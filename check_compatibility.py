@@ -17,8 +17,8 @@ def check_python_version():
     if sys.version_info < (3, 10):
         print("❌ ERROR: Python 3.10+ is required")
         return False
-    elif sys.version_info >= (3, 13):
-        print("⚠️  WARNING: Python 3.13+ is not fully tested")
+    elif sys.version_info >= (3, 14):
+        print("⚠️  WARNING: Python 3.14+ is not fully tested")
         return True
     else:
         print("✅ Python version is compatible")
