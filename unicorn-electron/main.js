@@ -9,9 +9,10 @@ function createWindow() {
         width: 1200,
         height: 800,
         webPreferences: {
-            nodeIntegration: true,
-            contextIsolation: false,
-            webSecurity: false  // Allows loading local files
+            nodeIntegration: false,
+            contextIsolation: true,
+            enableRemoteModule: false,
+            preload: path.join(__dirname, 'preload.js')
         },
         icon: path.join(__dirname, 'icon.png'), // Add your icon file
         title: 'Princess Unicorn Progress Tracker',
@@ -25,48 +26,37 @@ function createWindow() {
     // Show window when ready to prevent visual flash
     mainWindow.once('ready-to-show', () => {
         mainWindow.show();
-        console.log('Electron app ready');
     });
 
     // Enable auto-refresh of progress data
     setInterval(() => {
         const progressPath = path.join(__dirname, '..', 'transfer_progress.json');
-        console.log('Checking progress file at:', progressPath);
-        console.log('File exists:', fs.existsSync(progressPath));
         
         if (fs.existsSync(progressPath)) {
             try {
                 const progressData = fs.readFileSync(progressPath, 'utf8');
-                console.log('Progress data length:', progressData.length);
-                console.log('Sending update to renderer...');
                 mainWindow.webContents.send('progress-update', progressData);
             } catch (error) {
-                console.error('Error reading progress file:', error);
+                // Silent error handling - don't log sensitive file paths
             }
-        } else {
-            console.log('Progress file not found');
         }
     }, 3000); // Check every 3 seconds
 
-    // Optional: Open DevTools in development
-    mainWindow.webContents.openDevTools();
+    // Optional: Open DevTools in development (disabled for security)
+    // mainWindow.webContents.openDevTools();
 }
 
 // Handle file reading from main process (more secure)
 ipcMain.handle('read-progress-file', async () => {
     try {
         const progressPath = path.join(__dirname, '..', 'transfer_progress.json');
-        console.log('IPC reading from:', progressPath);
         
         if (fs.existsSync(progressPath)) {
             const data = fs.readFileSync(progressPath, 'utf8');
-            console.log('IPC read data length:', data.length);
             return data;
         }
-        console.log('IPC: Progress file not found, returning empty object');
         return '{}';
     } catch (error) {
-        console.error('IPC Error reading progress file:', error);
         return '{}';
     }
 });
