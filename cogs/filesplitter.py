@@ -20,6 +20,39 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+# Configure enhanced logging for bulletproofing
+def setup_enhanced_logging():
+    """Setup comprehensive logging for the bulletproof file splitter"""
+    logger = logging.getLogger('FileSplitterBot')
+    
+    if not logger.handlers:  # Only setup if not already configured
+        logger.setLevel(logging.DEBUG)
+        
+        # Create formatter for detailed logging
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+        )
+        
+        # Console handler for immediate feedback
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        
+        # File handler for detailed logging
+        try:
+            file_handler = logging.FileHandler('filesplitter.log')
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        except Exception:
+            pass  # Fail silently if can't create log file
+    
+    return logger
+
+# Initialize enhanced logging
+enhanced_logger = setup_enhanced_logging()
+
 PROGRESS_FILE = "transfer_progress.json"
 
 class FileSplitterCog(commands.Cog):
@@ -211,6 +244,7 @@ class FileSplitterCog(commands.Cog):
             
             # Check if path exists
             if not resolved_path.exists():
+                enhanced_logger.warning(f"Path validation failed - does not exist: {resolved_path}")
                 return False, f"Path does not exist: {resolved_path}", None
             
             # Check read permissions
@@ -848,385 +882,433 @@ class FileSplitterCog(commands.Cog):
     @app_commands.command(name="download", description="Downloads and rebuilds a file or folder from a channel (with resume & ETA).")
     @app_commands.describe(channel_name="Name of the channel to download from (optional, uses current channel if not specified)")
     async def download_file(self, interaction: discord.Interaction, channel_name: str = None):
+        """Enhanced download method with comprehensive validation and error handling"""
         await interaction.response.defer()
         
-        # Determine target channel
-        if channel_name:
-            target_channel = discord.utils.get(interaction.guild.text_channels, name=channel_name.lower().replace(' ', '-'))
-            if not target_channel:
-                await interaction.followup.send(f"❌ Channel '{channel_name}' not found.", ephemeral=True)
-                return
-        else:
-            target_channel = interaction.channel
+        # Track cleanup resources
+        temp_files_to_cleanup = []
+        temp_dirs_to_cleanup = []
+        target_channel = None
         
-        await interaction.followup.send(f"🔍 Scanning {target_channel.mention} for downloadable files...", ephemeral=True)
-        
-        # Scan channel for file chunks (both regular and consolidated)
-        chunks = {}
-        file_info = {}
-        consolidated_chunks = {}
-        
-        async for message in target_channel.history(limit=None):
-            if message.attachments:
-                for attachment in message.attachments:
-                    filename = attachment.filename
+        try:
+            # Validate channel name if provided
+            if channel_name:
+                channel_valid, channel_error, sanitized_channel_name = self._validate_channel_name(channel_name)
+                if not channel_valid:
+                    await interaction.followup.send(f"❌ **Channel Name Error:** {channel_error}", ephemeral=True)
+                    return
+                
+                # Find channel with enhanced error handling
+                target_channel = discord.utils.get(interaction.guild.text_channels, name=sanitized_channel_name)
+                if not target_channel:
+                    # Try original channel name as fallback
+                    original_sanitized = channel_name.lower().replace(' ', '-')
+                    target_channel = discord.utils.get(interaction.guild.text_channels, name=original_sanitized)
                     
-                    # Check for consolidated chunks first
-                    if 'consolidated_chunk_' in filename:
-                        try:
-                            # Parse consolidated chunk filename
-                            # Format: consolidated_chunk_X_of_Y[.consolidated][.sha256_HASH][.enc]
-                            base_name = filename.split('.consolidated')[0]
-                            remaining_parts = filename[len(base_name):]
-                            
-                            # Extract hash and encryption info
-                            chunk_hash = None
-                            is_encrypted = remaining_parts.endswith('.enc')
-                            
-                            if '.sha256_' in remaining_parts:
-                                hash_parts = remaining_parts.split('.sha256_')
-                                if len(hash_parts) > 1:
-                                    hash_with_ext = hash_parts[1]
-                                    if '.enc' in hash_with_ext:
-                                        chunk_hash = hash_with_ext.split('.enc')[0]
-                                    else:
-                                        chunk_hash = hash_with_ext
+                if not target_channel:
+                    await interaction.followup.send(f"❌ **Channel not found:** '{channel_name}'\n" 
+                                                  f"Searched for: `{sanitized_channel_name}` and `{original_sanitized}`", ephemeral=True)
+                    return
+            else:
+                target_channel = interaction.channel
+            
+            # Validate download permissions
+            if not target_channel.permissions_for(interaction.guild.me).read_messages:
+                await interaction.followup.send(f"❌ **No permission to read messages in** {target_channel.mention}", ephemeral=True)
+                return
+                
+            if not target_channel.permissions_for(interaction.guild.me).read_message_history:
+                await interaction.followup.send(f"❌ **No permission to read message history in** {target_channel.mention}", ephemeral=True)
+                return
+            
+            await interaction.followup.send(f"🔍 **Scanning** {target_channel.mention} **for downloadable files...** "
+                                          f"(This may take time for channels with many messages)", ephemeral=True)
+            
+            # Scan channel for file chunks (both regular and consolidated)
+            chunks = {}
+            file_info = {}
+            consolidated_chunks = {}
+            
+            async for message in target_channel.history(limit=None):
+                if message.attachments:
+                    for attachment in message.attachments:
+                        filename = attachment.filename
+                        
+                        # Check for consolidated chunks first
+                        if 'consolidated_chunk_' in filename:
+                            try:
+                                # Parse consolidated chunk filename
+                                # Format: consolidated_chunk_X_of_Y[.consolidated][.sha256_HASH][.enc]
+                                base_name = filename.split('.consolidated')[0]
+                                remaining_parts = filename[len(base_name):]
+                                
+                                # Extract hash and encryption info
+                                chunk_hash = None
+                                is_encrypted = remaining_parts.endswith('.enc')
+                                
+                                if '.sha256_' in remaining_parts:
+                                    hash_parts = remaining_parts.split('.sha256_')
+                                    if len(hash_parts) > 1:
+                                        hash_with_ext = hash_parts[1]
+                                        if '.enc' in hash_with_ext:
+                                            chunk_hash = hash_with_ext.split('.enc')[0]
+                                        else:
+                                            chunk_hash = hash_with_ext
+                                        
+                                        if len(chunk_hash) == 16:
+                                            pass  # Valid hash
+                                        else:
+                                            chunk_hash = None
+                                
+                                # Parse consolidated chunk part number
+                                part_match = re.search(r'consolidated_chunk_(\d+)_of_(\d+)', base_name)
+                                if part_match:
+                                    part_num = int(part_match.group(1))
+                                    total_parts = int(part_match.group(2))
                                     
-                                    if len(chunk_hash) == 16:
-                                        pass  # Valid hash
-                                    else:
-                                        chunk_hash = None
-                            
-                            # Parse consolidated chunk part number
-                            part_match = re.search(r'consolidated_chunk_(\d+)_of_(\d+)', base_name)
-                            if part_match:
+                                    consolidated_chunks[part_num] = {
+                                        'url': attachment.url,
+                                        'size': attachment.size,
+                                        'message_id': message.id,
+                                        'encrypted': is_encrypted,
+                                        'total_parts': total_parts
+                                    }
+                                    
+                                    if chunk_hash:
+                                        consolidated_chunks[part_num]['hash'] = chunk_hash
+                                        
+                            except Exception:
+                                continue
+                        
+                        # Check if it matches regular chunk pattern 
+                        elif '.part_' in filename and '_of_' in filename:
+                            try:
+                                # Extract encoded path and part info
+                                base_name = filename.split('.part_')[0]
+                                remaining_parts = filename.split('.part_')[1]
+                                
+                                # Extract hash and encryption info from filename
+                                chunk_hash = None
+                                is_encrypted = remaining_parts.endswith('.enc')
+                                
+                                if '.sha256_' in remaining_parts:
+                                    hash_parts = remaining_parts.split('.sha256_')
+                                    if len(hash_parts) > 1:
+                                        # Extract hash, handling .enc extension
+                                        hash_with_ext = hash_parts[1]
+                                        if '.enc' in hash_with_ext:
+                                            chunk_hash = hash_with_ext.split('.enc')[0]
+                                        else:
+                                            chunk_hash = hash_with_ext
+                                        
+                                        # Only use hash if it's the full 16 characters (not truncated)
+                                        if len(chunk_hash) == 16:
+                                            pass  # Hash is valid
+                                        else:
+                                            chunk_hash = None  # Truncated, skip verification
+                                    remaining_parts = hash_parts[0]
+                                
+                                # Parse part_X_of_Y
+                                part_match = re.match(r'(\d+)_of_(\d+)', remaining_parts)
+                                if not part_match:
+                                    continue
+                                    
                                 part_num = int(part_match.group(1))
                                 total_parts = int(part_match.group(2))
                                 
-                                consolidated_chunks[part_num] = {
+                                # Decode the original path
+                                try:
+                                    original_path = self.decode_path_from_filename(base_name)
+                                except Exception:
+                                    original_path = base_name
+                                
+                                if original_path not in chunks:
+                                    chunks[original_path] = {}
+                                    file_info[original_path] = {'total_parts': total_parts, 'size': 0}
+                                
+                                chunk_info = {
                                     'url': attachment.url,
                                     'size': attachment.size,
                                     'message_id': message.id,
-                                    'encrypted': is_encrypted,
-                                    'total_parts': total_parts
+                                    'encrypted': is_encrypted
                                 }
                                 
                                 if chunk_hash:
-                                    consolidated_chunks[part_num]['hash'] = chunk_hash
-                                    
-                        except Exception:
-                            continue
-                    
-                    # Check if it matches regular chunk pattern 
-                    elif '.part_' in filename and '_of_' in filename:
-                        try:
-                            # Extract encoded path and part info
-                            base_name = filename.split('.part_')[0]
-                            remaining_parts = filename.split('.part_')[1]
-                            
-                            # Extract hash and encryption info from filename
-                            chunk_hash = None
-                            is_encrypted = remaining_parts.endswith('.enc')
-                            
-                            if '.sha256_' in remaining_parts:
-                                hash_parts = remaining_parts.split('.sha256_')
-                                if len(hash_parts) > 1:
-                                    # Extract hash, handling .enc extension
-                                    hash_with_ext = hash_parts[1]
-                                    if '.enc' in hash_with_ext:
-                                        chunk_hash = hash_with_ext.split('.enc')[0]
-                                    else:
-                                        chunk_hash = hash_with_ext
-                                    
-                                    # Only use hash if it's the full 16 characters (not truncated)
-                                    if len(chunk_hash) == 16:
-                                        pass  # Hash is valid
-                                    else:
-                                        chunk_hash = None  # Truncated, skip verification
-                                remaining_parts = hash_parts[0]
-                            
-                            # Parse part_X_of_Y
-                            part_match = re.match(r'(\d+)_of_(\d+)', remaining_parts)
-                            if not part_match:
-                                continue
+                                    chunk_info['hash'] = chunk_hash
                                 
-                            part_num = int(part_match.group(1))
-                            total_parts = int(part_match.group(2))
-                            
-                            # Decode the original path
-                            try:
-                                original_path = self.decode_path_from_filename(base_name)
-                            except Exception:
-                                original_path = base_name
-                            
-                            if original_path not in chunks:
-                                chunks[original_path] = {}
-                                file_info[original_path] = {'total_parts': total_parts, 'size': 0}
-                            
-                            chunk_info = {
-                                'url': attachment.url,
-                                'size': attachment.size,
-                                'message_id': message.id,
-                                'encrypted': is_encrypted
-                            }
-                            
-                            if chunk_hash:
-                                chunk_info['hash'] = chunk_hash
-                            
-                            chunks[original_path][part_num] = chunk_info
-                            file_info[original_path]['size'] += attachment.size
-                            
-                        except Exception as e:
-                            # Silent error handling for chunk parsing
-                            continue
-        
-        # Process consolidated chunks to extract individual files
-        if consolidated_chunks:
-            await interaction.followup.send(f"🔍 Processing {len(consolidated_chunks)} consolidated chunks...", ephemeral=True)
-            
-            for part_num, chunk_info in consolidated_chunks.items():
-                try:
-                    # Download consolidated chunk
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(chunk_info['url']) as response:
-                            if response.status == 200:
-                                encrypted_chunk_data = await response.read()
+                                chunks[original_path][part_num] = chunk_info
+                                file_info[original_path]['size'] += attachment.size
                                 
-                                # Decrypt if needed
-                                try:
-                                    chunk_data = self._decrypt_data(encrypted_chunk_data)
-                                except Exception as e:
-                                    if self.encryption_enabled:
-                                        await target_channel.send(f"🔒 Failed to decrypt consolidated chunk {part_num}: {e}")
-                                        continue
-                                    else:
-                                        chunk_data = encrypted_chunk_data
-                                
-                                # Verify hash if available
-                                if 'hash' in chunk_info and self.enable_hashing:
-                                    calculated_hash = self._calculate_chunk_hash(chunk_data)
-                                    if calculated_hash and calculated_hash[:16] != chunk_info['hash']:
-                                        await target_channel.send(f"🔒 Hash mismatch for consolidated chunk {part_num}!")
-                                        continue
-                                
-                                # Extract individual files from consolidated chunk
-                                extracted_files = self._extract_files_from_consolidated_chunk(chunk_data)
-                                
-                                for file_data in extracted_files:
-                                    file_path = file_data['path']
-                                    
-                                    if file_path not in chunks:
-                                        chunks[file_path] = {}
-                                        file_info[file_path] = {'total_parts': 1, 'size': file_data['size']}
-                                    
-                                    chunks[file_path][1] = {
-                                        'consolidated_data': file_data['data'],
-                                        'size': file_data['size'],
-                                        'message_id': chunk_info['message_id']
-                                    }
-                except Exception as e:
-                    await target_channel.send(f"❌ Error processing consolidated chunk {part_num}: {e}")
-                    continue
-        
-        if not chunks and not consolidated_chunks:
-            await interaction.followup.send("❌ No downloadable files found in this channel.", ephemeral=True)
-            return
-        
-        # Display found files
-        files_summary = []
-        total_size = 0
-        for file_path, info in file_info.items():
-            found_parts = len(chunks[file_path])
-            expected_parts = info['total_parts']
-            size_mb = info['size'] / (1024 * 1024)
-            total_size += info['size']
-            status = "✅ Complete" if found_parts == expected_parts else f"⚠️ {found_parts}/{expected_parts} parts"
-            files_summary.append(f"📄 `{file_path}` - {size_mb:.1f} MB - {status}")
-        
-        summary_text = f"🎯 Found {len(chunks)} files ({total_size / (1024 * 1024 * 1024):.2f} GB total):\n" + "\n".join(files_summary[:10])
-        if len(files_summary) > 10:
-            summary_text += f"\n... and {len(files_summary) - 10} more files"
-        
-        await target_channel.send(summary_text)
-        
-        # Load progress
-        progress_data = self.load_progress("download", target_channel.id)
-        completed_files = set(progress_data.get("completed_chunks", []))
-        start_time = time.time() if not progress_data.get("start_time") else progress_data["start_time"]
-        errors = progress_data.get("errors", [])
-        downloaded_bytes = progress_data.get("uploaded_size_bytes", 0)  # Reuse same field name
-        
-        total_files = len(chunks)
-        completed_count = len(completed_files)
-        
-        await target_channel.send(f"⬇️ Starting download... ({completed_count}/{total_files} files already completed)")
-        
-        # Download and reconstruct files
-        for file_path, file_chunks in chunks.items():
-            if file_path in completed_files:
-                continue
-                
-            try:
-                # Create directory structure
-                output_path = Path(self.upload_dir) / file_path
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                # Check if we need to resume
-                partial_path = output_path.with_suffix(output_path.suffix + '.partial')
-                resume_part = 1
-                if partial_path.exists():
-                    # Calculate which part to resume from
-                    existing_size = partial_path.stat().st_size
-                    resume_part = (existing_size // self.max_chunk_size) + 1
-                    await target_channel.send(f"🔄 Resuming `{file_path}` from part {resume_part}")
-                
-                total_parts = file_info[file_path]['total_parts']
-                await target_channel.send(f"⬇️ Downloading `{file_path}` ({total_parts} parts)...")
-                
-                file_downloaded_bytes = 0
-                
-                # Download chunks in order (or use consolidated data)
-                with open(partial_path, 'ab' if resume_part > 1 else 'wb') as output_file:
-                    for part_num in range(resume_part, total_parts + 1):
-                        if part_num not in file_chunks:
-                            await target_channel.send(f"❌ Missing part {part_num} for `{file_path}`")
-                            errors.append(f"{file_path}: missing part {part_num}")
-                            break
-                        
-                        chunk_info = file_chunks[part_num]
-                        
-                        # Handle consolidated chunk data (already extracted)
-                        if 'consolidated_data' in chunk_info:
-                            chunk_data = chunk_info['consolidated_data']
-                            output_file.write(chunk_data)
-                            file_downloaded_bytes += len(chunk_data)
-                            continue
-                        
-                        # Handle regular chunk data
-                        retries = self.max_retry_attempts
-                        
-                        while retries > 0:
-                            try:
-                                async with aiohttp.ClientSession() as session:
-                                    async with session.get(chunk_info['url']) as response:
-                                        if response.status == 200:
-                                            encrypted_chunk_data = await response.read()
-                                            
-                                            # Decrypt chunk if encryption is enabled
-                                            try:
-                                                chunk_data = self._decrypt_data(encrypted_chunk_data)
-                                            except Exception as e:
-                                                if self.encryption_enabled:
-                                                    await target_channel.send(f"🔒 Decryption failed for part {part_num}: {e}")
-                                                    retries = 0
-                                                    break
-                                                else:
-                                                    chunk_data = encrypted_chunk_data
-                                            
-                                            # Verify hash if available (compare only truncated portion)
-                                            if 'hash' in chunk_info and self.enable_hashing:
-                                                calculated_hash = self._calculate_chunk_hash(chunk_data)
-                                                if calculated_hash and calculated_hash[:16] != chunk_info['hash']:
-                                                    await target_channel.send(f"🔒 Hash mismatch for part {part_num}! Expected: {chunk_info['hash']}..., Got: {calculated_hash[:16]}...")
-                                                    retries -= 1
-                                                    if retries > 0:
-                                                        delay = self._get_retry_delay(self.max_retry_attempts - retries)
-                                                        await asyncio.sleep(delay)
-                                                        continue
-                                                    else:
-                                                        errors.append(f"{file_path}: hash verification failed for part {part_num}")
-                                                        break
-                                            
-                                            output_file.write(chunk_data)
-                                            file_downloaded_bytes += len(chunk_data)
-                                            downloaded_bytes += len(chunk_data)
-                                            break
-                                        else:
-                                            raise aiohttp.ClientError(f"HTTP {response.status}")
                             except Exception as e:
-                                retries -= 1
-                                if retries > 0:
-                                    delay = self._get_retry_delay(self.max_retry_attempts - retries)
-                                    await target_channel.send(f"⚠️ Error downloading part {part_num}, retrying in {delay}s... ({retries} left)")
-                                    await asyncio.sleep(delay)
-                                else:
-                                    await target_channel.send(f"❌ Failed to download part {part_num}: {e}")
-                                    errors.append(f"{file_path}: part {part_num} failed")
-                                    break
-                        
-                        if retries == 0:
-                            break
-                        
-                        # Progress update every 10 parts
-                        if part_num % 10 == 0:
-                            progress_pct = int((part_num / total_parts) * 100)
-                            await target_channel.send(f"📊 `{file_path}`: {progress_pct}% ({part_num}/{total_parts})")
-                        
-                        await asyncio.sleep(0.5)  # Rate limiting
+                                # Silent error handling for chunk parsing
+                                continue
+            
+            # Process consolidated chunks to extract individual files
+            if consolidated_chunks:
+                await interaction.followup.send(f"🔍 Processing {len(consolidated_chunks)} consolidated chunks...", ephemeral=True)
                 
-                # Move completed file to final location
-                if partial_path.exists():
-                    # Perform final integrity check if enabled
-                    integrity_verified = True
-                    if self.enable_hashing:
-                        await target_channel.send(f"🔍 Verifying integrity of `{file_path}`...")
-                        final_hash = self._calculate_file_hash(str(partial_path))
-                        if final_hash:
-                            await target_channel.send(f"🔒 Final SHA-256: {final_hash[:16]}...")
+                for part_num, chunk_info in consolidated_chunks.items():
+                    try:
+                        # Download consolidated chunk
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(chunk_info['url']) as response:
+                                if response.status == 200:
+                                    encrypted_chunk_data = await response.read()
+                                    
+                                    # Decrypt if needed
+                                    try:
+                                        chunk_data = self._decrypt_data(encrypted_chunk_data)
+                                    except Exception as e:
+                                        if self.encryption_enabled:
+                                            await target_channel.send(f"🔒 Failed to decrypt consolidated chunk {part_num}: {e}")
+                                            continue
+                                        else:
+                                            chunk_data = encrypted_chunk_data
+                                    
+                                    # Verify hash if available
+                                    if 'hash' in chunk_info and self.enable_hashing:
+                                        calculated_hash = self._calculate_chunk_hash(chunk_data)
+                                        if calculated_hash and calculated_hash[:16] != chunk_info['hash']:
+                                            await target_channel.send(f"🔒 Hash mismatch for consolidated chunk {part_num}!")
+                                            continue
+                                    
+                                    # Extract individual files from consolidated chunk
+                                    extracted_files = self._extract_files_from_consolidated_chunk(chunk_data)
+                                    
+                                    for file_data in extracted_files:
+                                        file_path = file_data['path']
+                                        
+                                        if file_path not in chunks:
+                                            chunks[file_path] = {}
+                                            file_info[file_path] = {'total_parts': 1, 'size': file_data['size']}
+                                        
+                                        chunks[file_path][1] = {
+                                            'consolidated_data': file_data['data'],
+                                            'size': file_data['size'],
+                                            'message_id': chunk_info['message_id']
+                                        }
+                    except Exception as e:
+                        await target_channel.send(f"❌ Error processing consolidated chunk {part_num}: {e}")
+                        continue
+            
+            if not chunks and not consolidated_chunks:
+                await interaction.followup.send("❌ No downloadable files found in this channel.", ephemeral=True)
+                return
+            
+            # Display found files
+            files_summary = []
+            total_size = 0
+            for file_path, info in file_info.items():
+                found_parts = len(chunks[file_path])
+                expected_parts = info['total_parts']
+                size_mb = info['size'] / (1024 * 1024)
+                total_size += info['size']
+                status = "✅ Complete" if found_parts == expected_parts else f"⚠️ {found_parts}/{expected_parts} parts"
+                files_summary.append(f"📄 `{file_path}` - {size_mb:.1f} MB - {status}")
+            
+            summary_text = f"🎯 Found {len(chunks)} files ({total_size / (1024 * 1024 * 1024):.2f} GB total):\n" + "\n".join(files_summary[:10])
+            if len(files_summary) > 10:
+                summary_text += f"\n... and {len(files_summary) - 10} more files"
+            
+            await target_channel.send(summary_text)
+            
+            # Load progress
+            progress_data = self.load_progress("download", target_channel.id)
+            completed_files = set(progress_data.get("completed_chunks", []))
+            start_time = time.time() if not progress_data.get("start_time") else progress_data["start_time"]
+            errors = progress_data.get("errors", [])
+            downloaded_bytes = progress_data.get("uploaded_size_bytes", 0)  # Reuse same field name
+            
+            total_files = len(chunks)
+            completed_count = len(completed_files)
+            
+            await target_channel.send(f"⬇️ Starting download... ({completed_count}/{total_files} files already completed)")
+            
+            # Download and reconstruct files
+            for file_path, file_chunks in chunks.items():
+                if file_path in completed_files:
+                    continue
+                    
+                try:
+                    # Create directory structure
+                    output_path = Path(self.upload_dir) / file_path
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # Check if we need to resume
+                    partial_path = output_path.with_suffix(output_path.suffix + '.partial')
+                    resume_part = 1
+                    if partial_path.exists():
+                        # Calculate which part to resume from
+                        existing_size = partial_path.stat().st_size
+                        resume_part = (existing_size // self.max_chunk_size) + 1
+                        await target_channel.send(f"🔄 Resuming `{file_path}` from part {resume_part}")
+                    
+                    total_parts = file_info[file_path]['total_parts']
+                    await target_channel.send(f"⬇️ Downloading `{file_path}` ({total_parts} parts)...")
+                    
+                    file_downloaded_bytes = 0
+                    
+                    # Download chunks in order (or use consolidated data)
+                    with open(partial_path, 'ab' if resume_part > 1 else 'wb') as output_file:
+                        for part_num in range(resume_part, total_parts + 1):
+                            if part_num not in file_chunks:
+                                await target_channel.send(f"❌ Missing part {part_num} for `{file_path}`")
+                                errors.append(f"{file_path}: missing part {part_num}")
+                                break
+                            
+                            chunk_info = file_chunks[part_num]
+                            
+                            # Handle consolidated chunk data (already extracted)
+                            if 'consolidated_data' in chunk_info:
+                                chunk_data = chunk_info['consolidated_data']
+                                output_file.write(chunk_data)
+                                file_downloaded_bytes += len(chunk_data)
+                                continue
+                            
+                            # Handle regular chunk data
+                            retries = self.max_retry_attempts
+                            
+                            while retries > 0:
+                                try:
+                                    async with aiohttp.ClientSession() as session:
+                                        async with session.get(chunk_info['url']) as response:
+                                            if response.status == 200:
+                                                encrypted_chunk_data = await response.read()
+                                                
+                                                # Decrypt chunk if encryption is enabled
+                                                try:
+                                                    chunk_data = self._decrypt_data(encrypted_chunk_data)
+                                                except Exception as e:
+                                                    if self.encryption_enabled:
+                                                        await target_channel.send(f"🔒 Decryption failed for part {part_num}: {e}")
+                                                        retries = 0
+                                                        break
+                                                    else:
+                                                        chunk_data = encrypted_chunk_data
+                                                
+                                                # Verify hash if available (compare only truncated portion)
+                                                if 'hash' in chunk_info and self.enable_hashing:
+                                                    calculated_hash = self._calculate_chunk_hash(chunk_data)
+                                                    if calculated_hash and calculated_hash[:16] != chunk_info['hash']:
+                                                        await target_channel.send(f"🔒 Hash mismatch for part {part_num}! Expected: {chunk_info['hash']}..., Got: {calculated_hash[:16]}...")
+                                                        retries -= 1
+                                                        if retries > 0:
+                                                            delay = self._get_retry_delay(self.max_retry_attempts - retries)
+                                                            await asyncio.sleep(delay)
+                                                            continue
+                                                        else:
+                                                            errors.append(f"{file_path}: hash verification failed for part {part_num}")
+                                                            break
+                                                
+                                                output_file.write(chunk_data)
+                                                file_downloaded_bytes += len(chunk_data)
+                                                downloaded_bytes += len(chunk_data)
+                                                break
+                                            else:
+                                                raise aiohttp.ClientError(f"HTTP {response.status}")
+                                except Exception as e:
+                                    retries -= 1
+                                    if retries > 0:
+                                        delay = self._get_retry_delay(self.max_retry_attempts - retries)
+                                        await target_channel.send(f"⚠️ Error downloading part {part_num}, retrying in {delay}s... ({retries} left)")
+                                        await asyncio.sleep(delay)
+                                    else:
+                                        await target_channel.send(f"❌ Failed to download part {part_num}: {e}")
+                                        errors.append(f"{file_path}: part {part_num} failed")
+                                        break
+                            
+                            if retries == 0:
+                                break
+                            
+                            # Progress update every 10 parts
+                            if part_num % 10 == 0:
+                                progress_pct = int((part_num / total_parts) * 100)
+                                await target_channel.send(f"📊 `{file_path}`: {progress_pct}% ({part_num}/{total_parts})")
+                            
+                            await asyncio.sleep(0.5)  # Rate limiting
+                    
+                    # Move completed file to final location
+                    if partial_path.exists():
+                        # Perform final integrity check if enabled
+                        integrity_verified = True
+                        if self.enable_hashing:
+                            await target_channel.send(f"🔍 Verifying integrity of `{file_path}`...")
+                            final_hash = self._calculate_file_hash(str(partial_path))
+                            if final_hash:
+                                await target_channel.send(f"🔒 Final SHA-256: {final_hash[:16]}...")
+                            else:
+                                await target_channel.send("⚠️ Could not calculate file hash for verification")
+                                integrity_verified = False
+                        
+                        partial_path.rename(output_path)
+                        completed_files.add(file_path)
+                        completed_count += 1
+                        
+                        if integrity_verified:
+                            await target_channel.send(f"✅ Completed `{file_path}` with integrity verification")
                         else:
-                            await target_channel.send("⚠️ Could not calculate file hash for verification")
-                            integrity_verified = False
-                    
-                    partial_path.rename(output_path)
-                    completed_files.add(file_path)
-                    completed_count += 1
-                    
-                    if integrity_verified:
-                        await target_channel.send(f"✅ Completed `{file_path}` with integrity verification")
+                            await target_channel.send(f"⚠️ Completed `{file_path}` (integrity check failed)")
+                        
+                        # Update progress
+                        overall_progress = int((downloaded_bytes / total_size) * 100) if total_size > 0 else 0
+                        eta = self.get_eta(start_time, downloaded_bytes, total_size)
+                        await self.bot.change_presence(activity=discord.Game(name=f"Downloading: {overall_progress}% ({eta} left)"))
+                        
+                        transfer_speed = self.get_transfer_speed(start_time, downloaded_bytes)
+                        self.save_progress("download", target_channel.id, {
+                            "completed_chunks": list(completed_files),
+                            "total_size_bytes": total_size,
+                            "uploaded_size_bytes": downloaded_bytes,
+                            "start_time": start_time,
+                            "errors": errors,
+                            "integrity_verified": integrity_verified,
+                            "transfer_speed_mbps": transfer_speed,
+                            "formatted_speed": self.format_transfer_speed(transfer_speed)
+                        })
                     else:
-                        await target_channel.send(f"⚠️ Completed `{file_path}` (integrity check failed)")
+                        await target_channel.send(f"❌ Failed to complete `{file_path}` - partial file missing")
                     
-                    # Update progress
-                    overall_progress = int((downloaded_bytes / total_size) * 100) if total_size > 0 else 0
-                    eta = self.get_eta(start_time, downloaded_bytes, total_size)
-                    await self.bot.change_presence(activity=discord.Game(name=f"Downloading: {overall_progress}% ({eta} left)"))
-                    
-                    transfer_speed = self.get_transfer_speed(start_time, downloaded_bytes)
-                    self.save_progress("download", target_channel.id, {
-                        "completed_chunks": list(completed_files),
-                        "total_size_bytes": total_size,
-                        "uploaded_size_bytes": downloaded_bytes,
-                        "start_time": start_time,
-                        "errors": errors,
-                        "integrity_verified": integrity_verified,
-                        "transfer_speed_mbps": transfer_speed,
-                        "formatted_speed": self.format_transfer_speed(transfer_speed)
-                    })
+                except Exception as e:
+                    await target_channel.send(f"💥 Error processing `{file_path}`: {e}")
+                    errors.append(f"{file_path}: {e}")
+            
+            # Final summary
+            elapsed = int(time.time() - start_time)
+            final_percentage = int((downloaded_bytes / total_size) * 100) if total_size > 0 else 100
+            self.clear_progress("download", target_channel.id)
+            
+            await target_channel.send(
+                f"🎉 **Download Complete!**\n"
+                f"📁 Files downloaded to: `{self.upload_dir}/`\n"
+                f"📊 Total size: {total_size / (1024*1024*1024):.2f} GB\n"
+                f"📊 Downloaded: {downloaded_bytes / (1024*1024*1024):.2f} GB ({final_percentage}%)\n"
+                f"📊 Total files: {total_files:,}\n"
+                f"✅ Successful: {completed_count:,}\n"
+                f"❌ Errors: {len(errors)}\n"
+                f"⏱️ Time: {elapsed//60}m {elapsed%60}s\n"
+                f"{'🔴 Failed files: ' + ', '.join(errors[:5]) + ('...' if len(errors) > 5 else '') if errors else '🟢 All files downloaded successfully!'}"
+            )
+            
+            await self.bot.change_presence(activity=discord.Game(name="Idle"))
+        
+        except Exception as e:
+            logging.error(f"Critical error during download: {e}")
+            try:
+                if target_channel:
+                    await target_channel.send(f"💥 **Critical Download Error:** {e}\n"
+                                           f"Download has been terminated. Please try again or contact support.")
+                    self.clear_progress("download", target_channel.id)
                 else:
-                    await target_channel.send(f"❌ Failed to complete `{file_path}` - partial file missing")
-                
+                    await interaction.followup.send(f"💥 **Critical Download Error:** {e}", ephemeral=True)
+                await self.bot.change_presence(activity=discord.Game(name="Idle"))
+            except Exception as cleanup_error:
+                logging.error(f"Error during download cleanup: {cleanup_error}")
+        finally:
+            # Final cleanup
+            try:
+                self._cleanup_temp_resources(temp_files_to_cleanup, temp_dirs_to_cleanup)
             except Exception as e:
-                await target_channel.send(f"💥 Error processing `{file_path}`: {e}")
-                errors.append(f"{file_path}: {e}")
-        
-        # Final summary
-        elapsed = int(time.time() - start_time)
-        final_percentage = int((downloaded_bytes / total_size) * 100) if total_size > 0 else 100
-        self.clear_progress("download", target_channel.id)
-        
-        await target_channel.send(
-            f"🎉 **Download Complete!**\n"
-            f"📁 Files downloaded to: `{self.upload_dir}/`\n"
-            f"📊 Total size: {total_size / (1024*1024*1024):.2f} GB\n"
-            f"📊 Downloaded: {downloaded_bytes / (1024*1024*1024):.2f} GB ({final_percentage}%)\n"
-            f"📊 Total files: {total_files:,}\n"
-            f"✅ Successful: {completed_count:,}\n"
-            f"❌ Errors: {len(errors)}\n"
-            f"⏱️ Time: {elapsed//60}m {elapsed%60}s\n"
-            f"{'🔴 Failed files: ' + ', '.join(errors[:5]) + ('...' if len(errors) > 5 else '') if errors else '🟢 All files downloaded successfully!'}"
-        )
-        
-        await self.bot.change_presence(activity=discord.Game(name="Idle"))
+                logging.error(f"Error during final cleanup: {e}")
 
     @app_commands.command(name="test_bulletproofing", description="Test enhanced error handling and validation systems")
     async def test_bulletproofing(self, interaction: discord.Interaction):
