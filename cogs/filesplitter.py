@@ -189,6 +189,131 @@ class FileSplitterCog(commands.Cog):
             # Silent error handling for progress save
             pass
 
+    def _create_consolidated_files(self, file_list):
+        """Group small files into consolidated chunks and return processing plan"""
+        consolidated_groups = []
+        large_files = []
+        current_group = []
+        current_group_size = 0
+        
+        for abs_path, rel_path in file_list:
+            file_size = os.path.getsize(abs_path)
+            
+            # Files >= 8MB are processed individually
+            if file_size >= self.max_chunk_size:
+                large_files.append((abs_path, rel_path, file_size))
+            else:
+                # Try to add to current group
+                if current_group_size + file_size <= self.max_chunk_size:
+                    current_group.append((abs_path, rel_path, file_size))
+                    current_group_size += file_size
+                else:
+                    # Current group is full, start new one
+                    if current_group:
+                        consolidated_groups.append(current_group)
+                    current_group = [(abs_path, rel_path, file_size)]
+                    current_group_size = file_size
+        
+        # Add remaining group
+        if current_group:
+            consolidated_groups.append(current_group)
+            
+        return consolidated_groups, large_files
+
+    def _create_consolidated_chunk_data(self, file_group):
+        """Create consolidated chunk data with metadata for multiple files"""
+        import struct
+        
+        chunk_data = b""
+        file_metadata = []
+        
+        # Header: number of files (4 bytes)
+        chunk_data += struct.pack('>I', len(file_group))
+        
+        # For each file: path_length (4 bytes), path (variable), size (8 bytes), data (variable)
+        for abs_path, rel_path, file_size in file_group:
+            try:
+                with open(abs_path, 'rb') as f:
+                    file_data = f.read()
+                
+                # Encode path as UTF-8
+                path_bytes = rel_path.encode('utf-8')
+                
+                # Add metadata: path_length, path, size
+                chunk_data += struct.pack('>I', len(path_bytes))
+                chunk_data += path_bytes
+                chunk_data += struct.pack('>Q', len(file_data))
+                chunk_data += file_data
+                
+                file_metadata.append({
+                    'path': rel_path,
+                    'size': len(file_data),
+                    'offset': len(chunk_data) - len(file_data)
+                })
+                
+            except Exception as e:
+                # Skip files that can't be read
+                continue
+                
+        return chunk_data, file_metadata
+
+    def _extract_files_from_consolidated_chunk(self, chunk_data):
+        """Extract individual files from a consolidated chunk"""
+        import struct
+        
+        files = []
+        offset = 0
+        
+        try:
+            # Read number of files (4 bytes)
+            if len(chunk_data) < 4:
+                return files
+            
+            num_files = struct.unpack('>I', chunk_data[offset:offset+4])[0]
+            offset += 4
+            
+            # Read each file
+            for i in range(num_files):
+                if offset + 4 > len(chunk_data):
+                    break
+                    
+                # Read path length (4 bytes)
+                path_length = struct.unpack('>I', chunk_data[offset:offset+4])[0]
+                offset += 4
+                
+                if offset + path_length > len(chunk_data):
+                    break
+                    
+                # Read path
+                path = chunk_data[offset:offset+path_length].decode('utf-8')
+                offset += path_length
+                
+                if offset + 8 > len(chunk_data):
+                    break
+                    
+                # Read file size (8 bytes)
+                file_size = struct.unpack('>Q', chunk_data[offset:offset+8])[0]
+                offset += 8
+                
+                if offset + file_size > len(chunk_data):
+                    break
+                    
+                # Read file data
+                file_data = chunk_data[offset:offset+file_size]
+                offset += file_size
+                
+                files.append({
+                    'path': path,
+                    'size': file_size,
+                    'data': file_data
+                })
+                
+        except Exception as e:
+            # Error parsing consolidated chunk
+            return files
+            
+        return files
+
     def clear_progress(self, transfer_type, channel_id):
         try:
             if os.path.exists(PROGRESS_FILE):
@@ -274,11 +399,22 @@ class FileSplitterCog(commands.Cog):
         else:
             file_list = [(str(absolute_path), original_name)]
 
+        # Group files for consolidation
+        consolidated_groups, large_files = self._create_consolidated_files(file_list)
+        
+        # Calculate total chunks needed
         chunk_index_map = []
-        for abs_path, rel_path in file_list:
-            file_size = os.path.getsize(abs_path)
+        
+        # Add consolidated chunks (each group becomes 1 chunk)
+        for i, group in enumerate(consolidated_groups):
+            group_paths = [rel_path for _, rel_path, _ in group]
+            chunk_index_map.append(("consolidated", i+1, len(consolidated_groups), group_paths))
+        
+        # Add large file chunks (processed individually)
+        for abs_path, rel_path, file_size in large_files:
             total_parts = (file_size + self.max_chunk_size - 1) // self.max_chunk_size
-            chunk_index_map.extend([(rel_path, i+1, total_parts) for i in range(total_parts)])
+            chunk_index_map.extend([(rel_path, i+1, total_parts, None) for i in range(total_parts)])
+        
         total_chunks = len(chunk_index_map)
 
         progress_data = self.load_progress("upload", new_channel.id)
@@ -289,9 +425,73 @@ class FileSplitterCog(commands.Cog):
         uploaded_bytes = progress_data.get("uploaded_size_bytes", 0)
 
         await new_channel.send(f"📊 Total chunks to upload: {total_chunks}")
+        if consolidated_groups:
+            await new_channel.send(f"📦 Consolidating {sum(len(group) for group in consolidated_groups)} small files into {len(consolidated_groups)} chunks")
 
-        for abs_path, rel_path in file_list:
-            file_size = os.path.getsize(abs_path)
+        # Upload consolidated chunks first
+        for i, file_group in enumerate(consolidated_groups):
+            consolidated_chunk_id = f"consolidated_chunk_{i+1}_of_{len(consolidated_groups)}"
+            
+            if consolidated_chunk_id in completed_chunks:
+                continue
+                
+            try:
+                # Create consolidated chunk data
+                chunk_data, file_metadata = self._create_consolidated_chunk_data(file_group)
+                group_size = len(chunk_data)
+                
+                file_paths = [rel_path for _, rel_path, _ in file_group]
+                await new_channel.send(f"📦 Creating consolidated chunk {i+1}/{len(consolidated_groups)} ({group_size:,} bytes, {len(file_group)} files):")
+                for _, rel_path, file_size in file_group[:3]:
+                    await new_channel.send(f"   📄 {rel_path} ({file_size:,} bytes)")
+                if len(file_group) > 3:
+                    await new_channel.send(f"   ... and {len(file_group) - 3} more files")
+                
+                # Calculate hash before encryption
+                chunk_hash = self._calculate_chunk_hash(chunk_data) if self.enable_hashing else None
+                
+                # Encrypt chunk if encryption is enabled  
+                processed_chunk = self._encrypt_data(chunk_data)
+                
+                # Create enhanced filename with metadata
+                metadata_suffix = ".consolidated"
+                if chunk_hash:
+                    metadata_suffix += f".sha256_{chunk_hash[:16]}"
+                if self.encryption_enabled:
+                    metadata_suffix += ".enc"
+                
+                enhanced_chunk_id = f"{consolidated_chunk_id}{metadata_suffix}"
+                chunk_file = discord.File(fp=io.BytesIO(processed_chunk), filename=enhanced_chunk_id)
+                
+                upload_msg = f"📦 Consolidated chunk {i+1}/{len(consolidated_groups)} ({len(file_group)} files)"
+                if self.encryption_enabled:
+                    upload_msg += " 🔐"
+                if chunk_hash:
+                    upload_msg += " ✓"
+                    
+                retries = self.max_retry_attempts
+                while retries > 0:
+                    try:
+                        await new_channel.send(upload_msg, file=chunk_file)
+                        await asyncio.sleep(1)
+                        completed_chunks.add(consolidated_chunk_id)
+                        uploaded_bytes += group_size
+                        break
+                    except discord.errors.HTTPException as e:
+                        retries -= 1
+                        delay = self._get_retry_delay(self.max_retry_attempts - retries)
+                        await new_channel.send(f"❌ Error with consolidated chunk {i+1}: {e}. Retrying in {delay}s... ({retries} left)")
+                        await asyncio.sleep(delay)
+                    except Exception as e:
+                        await new_channel.send(f"💥 Unexpected error: {e}")
+                        retries = 0
+                        
+            except Exception as e:
+                await new_channel.send(f"❌ Failed to create consolidated chunk {i+1}: {e}")
+                errors.append(f"Consolidated chunk {i+1}: {e}")
+
+        # Upload large files (processed individually)
+        for abs_path, rel_path, file_size in large_files:
             total_parts = (file_size + self.max_chunk_size - 1) // self.max_chunk_size
             await new_channel.send(f"⬆️ Uploading `{rel_path}` ({file_size:,} bytes, {total_parts} parts)...")
             
@@ -408,16 +608,64 @@ class FileSplitterCog(commands.Cog):
         
         await interaction.followup.send(f"🔍 Scanning {target_channel.mention} for downloadable files...", ephemeral=True)
         
-        # Scan channel for file chunks
+        # Scan channel for file chunks (both regular and consolidated)
         chunks = {}
         file_info = {}
+        consolidated_chunks = {}
         
         async for message in target_channel.history(limit=None):
             if message.attachments:
                 for attachment in message.attachments:
                     filename = attachment.filename
-                    # Check if it matches our chunk pattern
-                    if '.part_' in filename and '_of_' in filename:
+                    
+                    # Check for consolidated chunks first
+                    if 'consolidated_chunk_' in filename:
+                        try:
+                            # Parse consolidated chunk filename
+                            # Format: consolidated_chunk_X_of_Y[.consolidated][.sha256_HASH][.enc]
+                            base_name = filename.split('.consolidated')[0]
+                            remaining_parts = filename[len(base_name):]
+                            
+                            # Extract hash and encryption info
+                            chunk_hash = None
+                            is_encrypted = remaining_parts.endswith('.enc')
+                            
+                            if '.sha256_' in remaining_parts:
+                                hash_parts = remaining_parts.split('.sha256_')
+                                if len(hash_parts) > 1:
+                                    hash_with_ext = hash_parts[1]
+                                    if '.enc' in hash_with_ext:
+                                        chunk_hash = hash_with_ext.split('.enc')[0]
+                                    else:
+                                        chunk_hash = hash_with_ext
+                                    
+                                    if len(chunk_hash) == 16:
+                                        pass  # Valid hash
+                                    else:
+                                        chunk_hash = None
+                            
+                            # Parse consolidated chunk part number
+                            part_match = re.search(r'consolidated_chunk_(\d+)_of_(\d+)', base_name)
+                            if part_match:
+                                part_num = int(part_match.group(1))
+                                total_parts = int(part_match.group(2))
+                                
+                                consolidated_chunks[part_num] = {
+                                    'url': attachment.url,
+                                    'size': attachment.size,
+                                    'message_id': message.id,
+                                    'encrypted': is_encrypted,
+                                    'total_parts': total_parts
+                                }
+                                
+                                if chunk_hash:
+                                    consolidated_chunks[part_num]['hash'] = chunk_hash
+                                    
+                        except Exception:
+                            continue
+                    
+                    # Check if it matches regular chunk pattern 
+                    elif '.part_' in filename and '_of_' in filename:
                         try:
                             # Extract encoded path and part info
                             base_name = filename.split('.part_')[0]
@@ -479,7 +727,55 @@ class FileSplitterCog(commands.Cog):
                             # Silent error handling for chunk parsing
                             continue
         
-        if not chunks:
+        # Process consolidated chunks to extract individual files
+        if consolidated_chunks:
+            await interaction.followup.send(f"🔍 Processing {len(consolidated_chunks)} consolidated chunks...", ephemeral=True)
+            
+            for part_num, chunk_info in consolidated_chunks.items():
+                try:
+                    # Download consolidated chunk
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(chunk_info['url']) as response:
+                            if response.status == 200:
+                                encrypted_chunk_data = await response.read()
+                                
+                                # Decrypt if needed
+                                try:
+                                    chunk_data = self._decrypt_data(encrypted_chunk_data)
+                                except Exception as e:
+                                    if self.encryption_enabled:
+                                        await target_channel.send(f"🔒 Failed to decrypt consolidated chunk {part_num}: {e}")
+                                        continue
+                                    else:
+                                        chunk_data = encrypted_chunk_data
+                                
+                                # Verify hash if available
+                                if 'hash' in chunk_info and self.enable_hashing:
+                                    calculated_hash = self._calculate_chunk_hash(chunk_data)
+                                    if calculated_hash and calculated_hash[:16] != chunk_info['hash']:
+                                        await target_channel.send(f"🔒 Hash mismatch for consolidated chunk {part_num}!")
+                                        continue
+                                
+                                # Extract individual files from consolidated chunk
+                                extracted_files = self._extract_files_from_consolidated_chunk(chunk_data)
+                                
+                                for file_data in extracted_files:
+                                    file_path = file_data['path']
+                                    
+                                    if file_path not in chunks:
+                                        chunks[file_path] = {}
+                                        file_info[file_path] = {'total_parts': 1, 'size': file_data['size']}
+                                    
+                                    chunks[file_path][1] = {
+                                        'consolidated_data': file_data['data'],
+                                        'size': file_data['size'],
+                                        'message_id': chunk_info['message_id']
+                                    }
+                except Exception as e:
+                    await target_channel.send(f"❌ Error processing consolidated chunk {part_num}: {e}")
+                    continue
+        
+        if not chunks and not consolidated_chunks:
             await interaction.followup.send("❌ No downloadable files found in this channel.", ephemeral=True)
             return
         
@@ -536,7 +832,7 @@ class FileSplitterCog(commands.Cog):
                 
                 file_downloaded_bytes = 0
                 
-                # Download chunks in order
+                # Download chunks in order (or use consolidated data)
                 with open(partial_path, 'ab' if resume_part > 1 else 'wb') as output_file:
                     for part_num in range(resume_part, total_parts + 1):
                         if part_num not in file_chunks:
@@ -545,6 +841,15 @@ class FileSplitterCog(commands.Cog):
                             break
                         
                         chunk_info = file_chunks[part_num]
+                        
+                        # Handle consolidated chunk data (already extracted)
+                        if 'consolidated_data' in chunk_info:
+                            chunk_data = chunk_info['consolidated_data']
+                            output_file.write(chunk_data)
+                            file_downloaded_bytes += len(chunk_data)
+                            continue
+                        
+                        # Handle regular chunk data
                         retries = self.max_retry_attempts
                         
                         while retries > 0:
