@@ -1,5 +1,6 @@
-discord.py
-aiohttp
-aiofiles
-python-dotenv
-PyGithub
+discord.py>=2.6.0,<3.0.0
+aiohttp>=3.10.0,<4.0.0
+aiofiles>=24.0.0,<25.0.0
+python-dotenv>=1.0.0,<2.0.0
+PyGithub>=2.0.0,<3.0.0
+cryptography>=41.0.0,<43.0.0
