@@ -1,115 +1,174 @@
-# DiscordFileSplitterBotDEUX
+# Discord File Splitter Bot
 
-Personal experimental Discord bot + helper script that chops bigger files into smaller chunks and (eventually) can reassemble them later. Mostly just me messing around.
+A Discord bot that splits large files into smaller chunks for upload to Discord channels and can reassemble them later. This tool helps work around Discord's file size limitations while maintaining file integrity.
 
-⚠️ Use at your own risk.  
-Not endorsed by Discord. Don’t spam, don’t abuse, don’t treat this like a production “infinite storage” tool. It’s tinkering code, not a stealth platform.
+> ⚠️ **Important Notice**  
+> This is experimental software. Use at your own risk and responsibility.  
+> Not affiliated with or endorsed by Discord Inc. Please respect Discord's Terms of Service and don't abuse their platform.
 
-## What It Does (Idea Stage → Partial)
-- Splits a file into chunk-sized pieces under typical Discord upload limits.
-- Tracks in-progress transfers (mechanism still evolving).
-- Intended to reassemble original files from chunk messages.
-- Command prefix list (comma-separated).
-- Optional single-guild restriction (`GUILD_ID`) to keep scope tight.
+## Features
 
-## Components
-| Component | Language | File(s) | Purpose |
-|-----------|----------|---------|---------|
-| Bot core | Python | `main.py` | Commands + chunk logic |
-| Logging helper | Python | `log.py` | Basic logging |
-| (Optional) Node helper | Node.js | `server.js` | Future UI / experimental API |
-| Launch scripts | Shell / Batch | `start.sh`, `start.bat`, `start-electron.bat` | Convenience |
-| Runtime progress (ignored) | JSON | `transfer_progress.json` (ignored now) | Ephemeral state |
-| Example schema | JSON | `transfer_progress.example.json` | Shows structure |
+- **File Splitting**: Automatically splits large files into chunks that fit Discord's upload limits (~8MB)
+- **Folder Support**: Upload entire folder structures while preserving directory layout
+- **Resume Capability**: Pause and resume transfers with progress tracking
+- **Integrity Verification**: Hash verification to ensure file completeness during reassembly
+- **Slash Commands**: Modern Discord slash command interface
+- **Progress Monitoring**: Real-time upload/download progress with ETA calculations
+
+## Architecture
+
+| Component | Technology | File(s) | Purpose |
+|-----------|-----------|---------|---------|
+| Bot Core | Python 3.10+ | `main.py` | Discord bot with slash commands |
+| File Handler | Python | `cogs/filesplitter.py` | File chunking and reassembly logic |
+| Logger | Python | `log.py` | Centralized logging system |
+| Optional Web UI | Node.js | `server.js` | Experimental web interface |
+| Launch Scripts | Shell/Batch | `start.*` | Convenience startup scripts |
 
 ## Requirements
-- Python 3.10+
-- Node 18+ (only if you actually use the Node side)
-- Discord bot token
-- Git + virtualenv basics
 
-## Setup
+- **Python 3.10+** with pip
+- **Node.js 18+** (optional, for web interface only)
+- **Discord Bot Token** with appropriate permissions
+- **Git** for repository management
+
+## Quick Start
+
+### 1. Environment Setup
+
 ```bash
+# Clone the repository
+git clone https://github.com/jinople/DiscordFileSplitterBotDEUX.git
+cd DiscordFileSplitterBotDEUX
+
+# Copy environment template
 cp .env.example .env
-# edit .env
 ```
 
-| Var | Meaning |
-|-----|---------|
-| TOKEN | Bot token (keep private) |
-| PREFIX | Comma-separated prefixes (first is main) |
-| GUILD_ID | (Optional) Limit bot to one guild |
+### 2. Configure Environment Variables
 
-## Install (Python)
+Edit `.env` with your Discord bot configuration:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `TOKEN` | Discord bot token (keep private!) | `"your_bot_token_here"` |
+| `PREFIX` | Command prefixes (comma-separated) | `". ,"` |
+| `GUILD_ID` | (Optional) Restrict bot to specific server | `"123456789012345678"` |
+
+### 3. Python Installation
+
 ```bash
+# Create virtual environment
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+
+# Activate virtual environment
+# Linux/macOS:
+source .venv/bin/activate
+# Windows:
+.venv\Scripts\activate
+
+# Install dependencies
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## Install (Node – optional)
+### 4. Optional: Node.js Setup
+
 ```bash
 npm install
 ```
 
-## Run
+### 5. Run the Bot
+
 ```bash
 python main.py
-# Optional helper:
+
+# Optional: Start web interface
 node server.js
 ```
 
-## Commands (Planned / Placeholder)
-| Command | Intent |
-|---------|--------|
-| upload <file> | Split + send |
-| retrieve <id> | Reassemble |
-| status | Show progress |
-| cancel <id> | Cancel a transfer (future) |
+## Usage
 
-## Chunking (Fill Out As You Stabilize)
-Document later:
-- Chunk size chosen (e.g. ~8 MB with buffer)
-- Naming convention
-- How you map chunk → message → original file
-- Integrity check (hash? size? both?)
+The bot provides the following slash commands:
 
-## Progress Tracking
-Real runtime state now ignored:
-- `transfer_progress.json` is no longer tracked
-- `transfer_progress.example.json` documents schema
+| Command | Description |
+|---------|-------------|
+| `/upload <file_path>` | Upload a file or folder, splitting it into chunks |
+| `/download [channel]` | Download and reassemble files from a channel |
 
-## Dev Quality (Optional)
-Python:
+### Example Workflow
+
+1. **Upload a file**: `/upload /path/to/large-file.zip`
+   - Bot creates a dedicated channel for the upload
+   - File is split into ~8MB chunks and uploaded
+   - Progress is tracked and displayed
+
+2. **Download/Reassemble**: `/download`
+   - Bot scans the channel for file chunks
+   - Downloads and reassembles the original file(s)
+   - Verifies file integrity
+
+## File Chunking Details
+
+- **Chunk Size**: ~8MB per chunk (configurable)
+- **Naming Convention**: Encoded filenames with chunk indices
+- **Integrity**: SHA256 hash verification on reassembly
+- **Progress Tracking**: JSON-based transfer state management
+
+## Development
+
+### Code Quality Tools
+
+**Python**:
 ```bash
 pip install black ruff
-black .
-ruff check .
+black .           # Format code
+ruff check .      # Lint code
 ```
-Node (if you care later):
+
+**Node.js** (optional):
 ```bash
 npm install --save-dev eslint prettier
 ```
 
-## Roadmap (Loose Ideas)
-- Actual resume support
-- Slash commands
-- Adjustable chunk size via env
-- Optional encryption
-- Simple web or TUI monitor
-- Hash verification on reassembly
+### Project Structure
+
+```
+├── main.py                 # Bot entry point
+├── log.py                  # Logging configuration  
+├── cogs/
+│   └── filesplitter.py     # Main bot functionality
+├── server.js               # Optional web interface
+├── .env.example            # Environment template
+└── requirements.txt        # Python dependencies
+```
+
+## Security Considerations
+
+- **Never commit `.env`** - Contains sensitive bot token
+- **Rotate tokens immediately** if accidentally exposed
+- **Use minimal Discord permissions** required for functionality
+- **Monitor bot usage** to prevent abuse
 
 ## Contributing
-Super casual. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Security-ish Stuff
-- Don’t commit `.env`
-- Rotate leaked tokens fast
-- Keep intents minimal
+Contributions are welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch
+3. Follow existing code style
+4. Test your changes
+5. Submit a pull request
 
 ## License
-See [LICENSE](LICENSE)
 
-## Final Vibe
-Just experimenting. If you run it, you own the consequences. Have fun.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
+## Roadmap
+
+- [ ] Enhanced resume capabilities
+- [ ] Configurable chunk sizes via environment variables  
+- [ ] Optional file encryption
+- [ ] Web/TUI monitoring interface
+- [ ] Improved error handling and recovery
+- [ ] Support for additional file integrity checks
