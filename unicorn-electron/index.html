@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Princess Unicorn File Portal</title>
+    <link href="https://fonts.googleapis.com/css2?family=Pacifico&family=Fredoka+One:wght@400&family=Nunito:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        
+        body {
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            font-family: 'Nunito', sans-serif;
+            background: 
+                url('background.gif') center/cover,
+                linear-gradient(135deg, #667eea 0%, #764ba2 25%, #f093fb 50%, #f5576c 75%, #4facfe 100%);
+            background-size: cover, 400% 400%;
+            background-blend-mode: overlay;
+            animation: gradientShift 8s ease infinite;
+            overflow-x: hidden;
+        }
+        
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: url('background.gif') center/cover;
+            opacity: 0.3;
+            pointer-events: none;
+            z-index: 1;
+            mix-blend-mode: overlay;
+        }
+
+        @keyframes gradientShift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        .container {
+            position: relative;
+            z-index: 10;
+            padding: 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        .main-title {
+            font-family: 'Fredoka One', cursive;
+            font-size: clamp(2.5rem, 5vw, 4.5rem);
+            color: #ffffff;
+            text-shadow: 
+                0 0 20px rgba(255, 182, 193, 0.8),
+                0 0 40px rgba(255, 105, 180, 0.6),
+                0 0 60px rgba(255, 20, 147, 0.4);
+            margin: 0;
+            animation: glow 2s ease-in-out infinite alternate;
+        }
+
+        @keyframes glow {
+            from {
+                text-shadow: 
+                    0 0 20px rgba(255, 182, 193, 0.8),
+                    0 0 40px rgba(255, 105, 180, 0.6),
+                    0 0 60px rgba(255, 20, 147, 0.4);
+            }
+            to {
+                text-shadow: 
+                    0 0 30px rgba(255, 182, 193, 1),
+                    0 0 60px rgba(255, 105, 180, 0.8),
+                    0 0 90px rgba(255, 20, 147, 0.6);
+            }
+        }
+
+        .subtitle {
+            font-family: 'Pacifico', cursive;
+            font-size: 1.5rem;
+            color: rgba(255, 255, 255, 0.9);
+            margin-top: 1rem;
+            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        .gif-gallery {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            margin: 2rem 0;
+            flex-wrap: wrap;
+        }
+
+        .gif-frame {
+            width: 120px;
+            height: 120px;
+            border-radius: 20px;
+            background: rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(10px);
+            border: 3px solid rgba(255, 182, 193, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 
+                0 8px 32px rgba(0, 0, 0, 0.1),
+                inset 0 1px 0 rgba(255, 255, 255, 0.2);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .gif-frame:hover {
+            transform: translateY(-10px) scale(1.05);
+            box-shadow: 
+                0 15px 40px rgba(255, 105, 180, 0.3),
+                inset 0 1px 0 rgba(255, 255, 255, 0.3);
+        }
+
+        .gif-frame img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 17px;
+        }
+
+        .gif-frame::before {
+            content: '✨';
+            position: absolute;
+            top: -10px;
+            right: -10px;
+            font-size: 24px;
+            animation: sparkle 1.5s infinite;
+            z-index: 2;
+        }
+
+        @keyframes sparkle {
+            0%, 100% { opacity: 0; transform: scale(0.8); }
+            50% { opacity: 1; transform: scale(1.2); }
+        }
+
+        .progress-section {
+            margin-top: 3rem;
+        }
+
+        .progress-card {
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(20px);
+            border-radius: 30px;
+            padding: 2.5rem;
+            margin-bottom: 2rem;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 
+                0 20px 40px rgba(0, 0, 0, 0.1),
+                inset 0 1px 0 rgba(255, 255, 255, 0.2);
+            transition: transform 0.3s ease;
+        }
+
+        .progress-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .transfer-title {
+            font-family: 'Pacifico', cursive;
+            font-size: 1.8rem;
+            color: #ffffff;
+            text-align: center;
+            margin-bottom: 1.5rem;
+            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        .progress-bar-container {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 25px;
+            height: 50px;
+            position: relative;
+            overflow: hidden;
+            margin-bottom: 1rem;
+            border: 2px solid rgba(255, 182, 193, 0.3);
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, 
+                #ff6b9d 0%, 
+                #ff8fab 25%, 
+                #ffb3ba 50%, 
+                #ff8fab 75%, 
+                #ff6b9d 100%);
+            background-size: 200% 100%;
+            border-radius: 23px;
+            transition: width 0.6s ease;
+            animation: progressShimmer 3s infinite;
+            position: relative;
+        }
+
+        @keyframes progressShimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+
+        .progress-bar::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, 
+                transparent 0%, 
+                rgba(255, 255, 255, 0.4) 50%, 
+                transparent 100%);
+            animation: shine 2s infinite;
+        }
+
+        @keyframes shine {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+
+        .progress-text {
+            text-align: center;
+            font-weight: 600;
+            font-size: 2rem;
+            color: #ffffff;
+            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+            margin-top: 1rem;
+        }
+
+        .chunks-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 1.5rem;
+            max-height: 200px;
+            overflow-y: auto;
+            padding: 1rem;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .chunk {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 0.5rem;
+            border-radius: 10px;
+            font-size: 0.9rem;
+            color: rgba(255, 255, 255, 0.9);
+            border: 1px solid rgba(255, 182, 193, 0.3);
+        }
+
+        .no-transfers {
+            text-align: center;
+            font-size: 1.5rem;
+            color: rgba(255, 255, 255, 0.8);
+            margin: 3rem 0;
+            font-family: 'Pacifico', cursive;
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 12px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, #ff6b9d, #ff8fab);
+            border-radius: 6px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(180deg, #ff8fab, #ffb3ba);
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+            
+            .gif-gallery {
+                gap: 1rem;
+            }
+            
+            .gif-frame {
+                width: 80px;
+                height: 80px;
+            }
+            
+            .progress-card {
+                padding: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1 class="main-title">Princess Unicorn Cloud</h1>
+            <p class="subtitle">Magical Discord File Portal ~ Infinite Storage Dreams Come True!</p>
+            
+            <div class="gif-gallery">
+                <div class="gif-frame">
+                    <img src="unicornfancyart.gif" alt="Fancy Unicorn" onerror="this.parentElement.innerHTML='🦄'">
+                </div>
+                <div class="gif-frame">
+                    <img src="glitterhollowheart.gif" alt="Glitter Heart" onerror="this.parentElement.innerHTML='💖'">
+                </div>
+                <div class="gif-frame">
+                    <img src="kissglitterlips.gif" alt="Kiss Lips" onerror="this.parentElement.innerHTML='💋'">
+                </div>
+                <div class="gif-frame">
+                    <img src="badassunicornrider.gif" alt="Unicorn Rider" onerror="this.parentElement.innerHTML='🏇'">
+                </div>
+                <div class="gif-frame">
+                    <img src="redroselove.gif" alt="Red Rose" onerror="this.parentElement.innerHTML='🌹'">
+                </div>
+            </div>
+        </div>
+
+        <div class="progress-section" id="progress-section"></div>
+    </div>
+
+    <script>
+        const { ipcRenderer } = require('electron');
+
+        function uwuify(text) {
+            return text
+                .replace(/(?:r|l)/g, "w")
+                .replace(/na/g, "nya")
+                .replace(/ove/g, "uv")
+                + " ^w^";
+        }
+
+        async function fetchProgress() {
+            try {
+                const progressText = await ipcRenderer.invoke('read-progress-file');
+                const data = JSON.parse(progressText);
+                console.log("Transfers found:", Object.keys(data).length);
+                updateProgressDisplay(data);
+            } catch(e) {
+                console.log("Error reading progress:", e);
+                updateProgressDisplay({});
+            }
+        }
+
+        function updateProgressDisplay(data) {
+            const progressSection = document.getElementById("progress-section");
+            
+            if (!data || typeof data !== "object" || Object.keys(data).length === 0) {
+                progressSection.innerHTML = `
+                    <div class="no-transfers">
+                        🌙 No active transfers right now ~ 
+                        <br>The magical cloud awaits your files!
+                    </div>
+                `;
+                return;
+            }
+
+            // Find the most recently started transfer
+            let activeTransfer = null;
+            let latestStartTime = 0;
+            
+            for (const [key, info] of Object.entries(data)) {
+                if (info.start_time && info.start_time > latestStartTime) {
+                    latestStartTime = info.start_time;
+                    activeTransfer = { key, info };
+                }
+            }
+            
+            if (!activeTransfer) {
+                let maxChunks = 0;
+                for (const [key, info] of Object.entries(data)) {
+                    if (info.completed_chunks && info.completed_chunks.length > maxChunks) {
+                        maxChunks = info.completed_chunks.length;
+                        activeTransfer = { key, info };
+                    }
+                }
+            }
+            
+            if (!activeTransfer) {
+                progressSection.innerHTML = `
+                    <div class="no-transfers">
+                        🌙 No active transfers right now ~ 
+                        <br>The magical cloud awaits your files!
+                    </div>
+                `;
+                return;
+            }
+
+            const { key, info } = activeTransfer;
+            const completed = info.completed_chunks.length;
+            const errors = info.errors ? info.errors.length : 0;
+            
+            let percent = 0;
+            let displayText = "";
+            
+            if (info.total_size_bytes && info.uploaded_size_bytes) {
+                percent = Math.round((info.uploaded_size_bytes / info.total_size_bytes) * 100);
+                const totalGB = (info.total_size_bytes / (1024 * 1024 * 1024)).toFixed(1);
+                const uploadedGB = (info.uploaded_size_bytes / (1024 * 1024 * 1024)).toFixed(1);
+                displayText = `${percent}% Complete!<br><span style="font-size: 1rem; opacity: 0.8;">${uploadedGB} GB of ${totalGB} GB transferred</span>`;
+            } else {
+                const total = completed + errors;
+                percent = total ? Math.round((completed / total) * 100) : 0;
+                displayText = `${percent}% Complete!<br><span style="font-size: 1rem; opacity: 0.8;">${completed} chunks completed</span>`;
+            }
+            
+            let chunksHTML = "";
+            if (info.completed_chunks.length > 0) {
+                chunksHTML = info.completed_chunks.slice(0, 20).map(chunk => {
+                    try {
+                        return `<div class="chunk">✅ ${decodeURIComponent(atob(chunk.split('.')[0]))}</div>`;
+                    } catch(e) {
+                        return `<div class="chunk">✅ ${chunk}</div>`;
+                    }
+                }).join('');
+                
+                if (info.completed_chunks.length > 20) {
+                    chunksHTML += `<div class="chunk">... and ${info.completed_chunks.length - 20} more!</div>`;
+                }
+            }
+
+            const progressHTML = `
+                <div class="progress-card">
+                    <div class="transfer-title">${uwuify(`Transfer: ${key.replace('download_', '').replace('upload_', '')}`)}</div>
+                    
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" style="width: ${percent}%"></div>
+                    </div>
+                    
+                    <div class="progress-text">
+                        ${displayText}
+                        ${errors > 0 ? `<br><span style="font-size: 0.9rem; color: #ffaaaa;">${errors} errors</span>` : ''}
+                    </div>
+                    
+                    ${chunksHTML ? `
+                        <details>
+                            <summary style="color: rgba(255,255,255,0.9); cursor: pointer; font-size: 1.1rem; margin: 1rem 0;">
+                                View Completed Files
+                            </summary>
+                            <div class="chunks-info">${chunksHTML}</div>
+                        </details>
+                    ` : ''}
+                </div>
+            `;
+            
+            progressSection.innerHTML = progressHTML;
+        }
+
+        // Listen for progress updates from main process
+        ipcRenderer.on('progress-update', (event, progressData) => {
+            console.log('Renderer received progress update, length:', progressData.length);
+            try {
+                const data = JSON.parse(progressData);
+                console.log('Renderer parsed data, transfers found:', Object.keys(data).length);
+                updateProgressDisplay(data);
+            } catch(e) {
+                console.log('Renderer error parsing progress update:', e);
+            }
+        });
+
+        // Initialize - load initial data
+        fetchProgress();
+    </script>
+</body>
+</html>
