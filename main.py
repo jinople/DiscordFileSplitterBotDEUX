@@ -2,10 +2,28 @@ import discord
 from discord.ext import commands
 import asyncio
 import os
+import sys
 from dotenv import load_dotenv
 from log import logger
 import signal
 import argparse
+
+# Check Python version compatibility
+if sys.version_info < (3, 10):
+    logger.error(f"Python {sys.version_info.major}.{sys.version_info.minor} is not supported. Please upgrade to Python 3.10 or higher.")
+    sys.exit(1)
+elif sys.version_info >= (3, 14):
+    logger.warning(f"Python {sys.version_info.major}.{sys.version_info.minor} may not be fully tested with this Discord bot. Recommended: Python 3.10-3.13")
+
+# Check Discord.py version compatibility
+try:
+    discord_version = tuple(map(int, discord.__version__.split('.')[:2]))
+    if discord_version < (2, 6):
+        logger.error(f"Discord.py {discord.__version__} is not supported. Please upgrade to Discord.py 2.6.0 or higher.")
+        sys.exit(1)
+    logger.info(f"Running with Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} and Discord.py {discord.__version__}")
+except Exception as e:
+    logger.warning(f"Could not verify Discord.py version: {e}")
 
 # Load .env
 load_dotenv()
