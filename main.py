@@ -77,14 +77,6 @@ class FileBot(commands.Bot):
         await self.tree.sync()
         await ctx.send("Commands synced!", ephemeral=True)
 
-    def get_config(self, key, default=None):
-        if not hasattr(self, 'config'):
-            self.logger.warning(f"Config not available, using default for {key}")
-            return default
-        
-        config_entry = self.config.get(key, None)
-        return default if config_entry is None else config_entry
-
 async def shutdown_bot():
     if bot:
         logger.info("Unloading all cogs")

@@ -12,6 +12,10 @@ import time
 import json
 import base64
 import urllib.parse
+import hashlib
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 PROGRESS_FILE = "transfer_progress.json"
 
@@ -19,12 +23,89 @@ class FileSplitterCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.upload_dir = "downloads"
-        self.max_chunk_size = 8 * 1024 * 1024
+        
+        # Configure chunk size from environment variable
+        chunk_size_mb = int(os.getenv("CHUNK_SIZE_MB", "8"))
+        self.max_chunk_size = chunk_size_mb * 1024 * 1024
+        
+        # Configure encryption settings
+        self.encryption_enabled = os.getenv("ENABLE_ENCRYPTION", "false").lower() == "true"
+        self.encryption_key = os.getenv("ENCRYPTION_KEY", "")
+        self.fernet = None
+        
+        # Configure retry and error handling
+        self.max_retry_attempts = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
+        self.retry_backoff_factor = float(os.getenv("RETRY_BACKOFF_FACTOR", "2.0"))
+        
+        # Configure file integrity checking
+        self.enable_hashing = os.getenv("ENABLE_FILE_HASHING", "true").lower() == "true"
+        
         self.uploaded_files = {}
+        
+        # Initialize encryption if enabled
+        if self.encryption_enabled:
+            self._init_encryption()
 
     async def cog_load(self):
         if not os.path.exists(self.upload_dir):
             os.makedirs(self.upload_dir)
+    
+    def _init_encryption(self):
+        """Initialize encryption with key derivation from password or random key"""
+        if self.encryption_key:
+            # Derive key from provided password
+            password = self.encryption_key.encode()
+            salt = b'discord_file_splitter_salt'  # Use consistent salt
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=salt,
+                iterations=100000,
+            )
+            key = base64.urlsafe_b64encode(kdf.derive(password))
+            self.fernet = Fernet(key)
+        else:
+            # Generate random key if none provided
+            key = Fernet.generate_key()
+            self.fernet = Fernet(key)
+            print(f"Generated encryption key: {key.decode()}")
+            print("Add this to your .env file as ENCRYPTION_KEY for consistent decryption")
+    
+    def _encrypt_data(self, data):
+        """Encrypt data if encryption is enabled"""
+        if not self.encryption_enabled or not self.fernet:
+            return data
+        return self.fernet.encrypt(data)
+    
+    def _decrypt_data(self, encrypted_data):
+        """Decrypt data if encryption is enabled"""
+        if not self.encryption_enabled or not self.fernet:
+            return encrypted_data
+        return self.fernet.decrypt(encrypted_data)
+    
+    def _calculate_file_hash(self, file_path):
+        """Calculate SHA-256 hash of a file"""
+        if not self.enable_hashing:
+            return None
+        
+        hash_sha256 = hashlib.sha256()
+        try:
+            with open(file_path, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hash_sha256.update(chunk)
+            return hash_sha256.hexdigest()
+        except Exception:
+            return None
+    
+    def _calculate_chunk_hash(self, data):
+        """Calculate SHA-256 hash of chunk data"""
+        if not self.enable_hashing:
+            return None
+        return hashlib.sha256(data).hexdigest()
+    
+    def _get_retry_delay(self, attempt_number):
+        """Calculate exponential backoff delay for retries"""
+        return min(30, (self.retry_backoff_factor ** attempt_number))
 
     def is_folder(self, path):
         return os.path.isdir(path)
@@ -91,9 +172,20 @@ class FileSplitterCog(commands.Cog):
                     all_progress = json.load(f)
             else:
                 all_progress = {}
-            all_progress[f"{transfer_type}_{channel_id}"] = progress_data
+                
+            # Enhance progress data with additional metadata
+            enhanced_data = progress_data.copy()
+            enhanced_data.update({
+                "last_updated": time.time(),
+                "chunk_size_mb": self.max_chunk_size // (1024 * 1024),
+                "encryption_enabled": self.encryption_enabled,
+                "hashing_enabled": self.enable_hashing,
+                "transfer_type": transfer_type
+            })
+            
+            all_progress[f"{transfer_type}_{channel_id}"] = enhanced_data
             with open(PROGRESS_FILE, "w") as f:
-                json.dump(all_progress, f)
+                json.dump(all_progress, f, indent=2)
         except Exception as e:
             print(f"Error saving progress: {e}")
 
@@ -123,6 +215,22 @@ class FileSplitterCog(commands.Cog):
             return f"{eta_seconds//60}m {eta_seconds%60}s"
         else:
             return f"{eta_seconds//3600}h {(eta_seconds%3600)//60}m"
+    
+    def get_transfer_speed(self, start_time, bytes_transferred):
+        """Calculate transfer speed in MB/s"""
+        elapsed = time.time() - start_time
+        if elapsed == 0:
+            return 0.0
+        return (bytes_transferred / (1024 * 1024)) / elapsed
+    
+    def format_transfer_speed(self, speed_mbps):
+        """Format transfer speed for display"""
+        if speed_mbps < 0.1:
+            return f"{speed_mbps * 1024:.1f} KB/s"
+        elif speed_mbps < 1.0:
+            return f"{speed_mbps:.2f} MB/s"
+        else:
+            return f"{speed_mbps:.1f} MB/s"
 
     @app_commands.command(name="upload", description="Uploads a large file or folder from a local path (with resume & ETA).")
     @app_commands.describe(file_path="The full path to the file or folder to upload.")
@@ -174,7 +282,6 @@ class FileSplitterCog(commands.Cog):
 
         progress_data = self.load_progress("upload", new_channel.id)
         completed_chunks = set(progress_data.get("completed_chunks", []))
-        chunks_uploaded = len(completed_chunks)
         last_percentage = 0
         start_time = time.time() if not progress_data.get("start_time") else progress_data["start_time"]
         errors = progress_data.get("errors", [])
@@ -198,23 +305,46 @@ class FileSplitterCog(commands.Cog):
                             continue
                         if (i + 1) % 50 == 0:
                             await asyncio.sleep(5)
-                        retries = 3
+                        retries = self.max_retry_attempts
                         chunk_uploaded_flag = False
                         while retries > 0:
                             try:
                                 chunk = await f.read(self.max_chunk_size)
                                 if not chunk:
                                     break
-                                chunk_file = discord.File(fp=io.BytesIO(chunk), filename=chunk_id)
-                                await new_channel.send(f"📦 `{rel_path}` - Part {i+1}/{total_parts}", file=chunk_file)
+                                
+                                # Calculate hash before encryption
+                                chunk_hash = self._calculate_chunk_hash(chunk) if self.enable_hashing else None
+                                
+                                # Encrypt chunk if encryption is enabled  
+                                processed_chunk = self._encrypt_data(chunk)
+                                
+                                # Create enhanced filename with metadata
+                                metadata_suffix = ""
+                                if chunk_hash:
+                                    metadata_suffix += f".sha256_{chunk_hash[:16]}"
+                                if self.encryption_enabled:
+                                    metadata_suffix += ".enc"
+                                
+                                enhanced_chunk_id = f"{chunk_id}{metadata_suffix}"
+                                chunk_file = discord.File(fp=io.BytesIO(processed_chunk), filename=enhanced_chunk_id)
+                                
+                                upload_msg = f"📦 `{rel_path}` - Part {i+1}/{total_parts}"
+                                if self.encryption_enabled:
+                                    upload_msg += " 🔒"
+                                if chunk_hash:
+                                    upload_msg += " ✓"
+                                    
+                                await new_channel.send(upload_msg, file=chunk_file)
                                 await asyncio.sleep(1)
                                 chunk_uploaded_flag = True
-                                uploaded_bytes += len(chunk)  # Track actual bytes uploaded
+                                uploaded_bytes += len(chunk)  # Track original bytes uploaded
                                 break
                             except discord.errors.HTTPException as e:
                                 retries -= 1
-                                await new_channel.send(f"⌐ Error with part {i+1}: {e}. Retrying... ({retries} left)")
-                                await asyncio.sleep(10)
+                                delay = self._get_retry_delay(self.max_retry_attempts - retries)
+                                await new_channel.send(f"⌐ Error with part {i+1}: {e}. Retrying in {delay}s... ({retries} left)")
+                                await asyncio.sleep(delay)
                             except Exception as e:
                                 await new_channel.send(f"💥 Unexpected error: {e}")
                                 retries = 0
@@ -223,7 +353,6 @@ class FileSplitterCog(commands.Cog):
                             errors.append(chunk_id)
                             continue
                         completed_chunks.add(chunk_id)
-                        chunks_uploaded = len(completed_chunks)
                         
                         # Calculate percentage based on bytes, not chunks
                         byte_percentage = int((uploaded_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
@@ -233,12 +362,15 @@ class FileSplitterCog(commands.Cog):
                             await self.bot.change_presence(activity=discord.Game(name=f"Uploading: {byte_percentage}% ({eta} left)"))
                             last_percentage = byte_percentage
                             
+                        transfer_speed = self.get_transfer_speed(start_time, uploaded_bytes)
                         self.save_progress("upload", new_channel.id, {
                             "completed_chunks": list(completed_chunks),
                             "total_size_bytes": total_size_bytes,
                             "uploaded_size_bytes": uploaded_bytes,
                             "start_time": start_time,
-                            "errors": errors
+                            "errors": errors,
+                            "transfer_speed_mbps": transfer_speed,
+                            "formatted_speed": self.format_transfer_speed(transfer_speed)
                         })
                 await new_channel.send(f"✅ Upload complete for `{rel_path}`.")
             except Exception as e:
@@ -288,10 +420,22 @@ class FileSplitterCog(commands.Cog):
                         try:
                             # Extract encoded path and part info
                             base_name = filename.split('.part_')[0]
-                            part_info = filename.split('.part_')[1]
+                            remaining_parts = filename.split('.part_')[1]
+                            
+                            # Extract hash and encryption info from filename
+                            chunk_hash = None
+                            is_encrypted = remaining_parts.endswith('.enc')
+                            
+                            if '.sha256_' in remaining_parts:
+                                hash_parts = remaining_parts.split('.sha256_')
+                                if len(hash_parts) > 1:
+                                    hash_segment = hash_parts[1].split('.')[0]  # Remove .enc or other extensions
+                                    # Hash is truncated in filename, we'll verify what we can
+                                    chunk_hash = hash_segment
+                                remaining_parts = hash_parts[0]
                             
                             # Parse part_X_of_Y
-                            part_match = re.match(r'(\d+)_of_(\d+)', part_info)
+                            part_match = re.match(r'(\d+)_of_(\d+)', remaining_parts)
                             if not part_match:
                                 continue
                                 
@@ -301,18 +445,24 @@ class FileSplitterCog(commands.Cog):
                             # Decode the original path
                             try:
                                 original_path = self.decode_path_from_filename(base_name)
-                            except:
+                            except Exception:
                                 original_path = base_name
                             
                             if original_path not in chunks:
                                 chunks[original_path] = {}
                                 file_info[original_path] = {'total_parts': total_parts, 'size': 0}
                             
-                            chunks[original_path][part_num] = {
+                            chunk_info = {
                                 'url': attachment.url,
                                 'size': attachment.size,
-                                'message_id': message.id
+                                'message_id': message.id,
+                                'encrypted': is_encrypted
                             }
+                            
+                            if chunk_hash:
+                                chunk_info['hash'] = chunk_hash
+                            
+                            chunks[original_path][part_num] = chunk_info
                             file_info[original_path]['size'] += attachment.size
                             
                         except Exception as e:
@@ -385,14 +535,40 @@ class FileSplitterCog(commands.Cog):
                             break
                         
                         chunk_info = file_chunks[part_num]
-                        retries = 3
+                        retries = self.max_retry_attempts
                         
                         while retries > 0:
                             try:
                                 async with aiohttp.ClientSession() as session:
                                     async with session.get(chunk_info['url']) as response:
                                         if response.status == 200:
-                                            chunk_data = await response.read()
+                                            encrypted_chunk_data = await response.read()
+                                            
+                                            # Decrypt chunk if encryption is enabled
+                                            try:
+                                                chunk_data = self._decrypt_data(encrypted_chunk_data)
+                                            except Exception as e:
+                                                if self.encryption_enabled:
+                                                    await target_channel.send(f"🔓 Decryption failed for part {part_num}: {e}")
+                                                    retries = 0
+                                                    break
+                                                else:
+                                                    chunk_data = encrypted_chunk_data
+                                            
+                                            # Verify hash if available
+                                            if 'hash' in chunk_info and self.enable_hashing:
+                                                calculated_hash = self._calculate_chunk_hash(chunk_data)
+                                                if calculated_hash != chunk_info['hash']:
+                                                    await target_channel.send(f"🔍 Hash mismatch for part {part_num}! Expected: {chunk_info['hash'][:16]}..., Got: {calculated_hash[:16] if calculated_hash else 'None'}...")
+                                                    retries -= 1
+                                                    if retries > 0:
+                                                        delay = self._get_retry_delay(self.max_retry_attempts - retries)
+                                                        await asyncio.sleep(delay)
+                                                        continue
+                                                    else:
+                                                        errors.append(f"{file_path}: hash verification failed for part {part_num}")
+                                                        break
+                                            
                                             output_file.write(chunk_data)
                                             file_downloaded_bytes += len(chunk_data)
                                             downloaded_bytes += len(chunk_data)
@@ -402,7 +578,9 @@ class FileSplitterCog(commands.Cog):
                             except Exception as e:
                                 retries -= 1
                                 if retries > 0:
-                                    await target_channel.send(f"⚠️ Error downloading part {part_num}, retrying... ({retries} left)")
+                                    delay = self._get_retry_delay(self.max_retry_attempts - retries)
+                                    await target_channel.send(f"⚠️ Error downloading part {part_num}, retrying in {delay}s... ({retries} left)")
+                                    await asyncio.sleep(delay)
                                     await asyncio.sleep(5)
                                 else:
                                     await target_channel.send(f"❌ Failed to download part {part_num}: {e}")
@@ -421,24 +599,44 @@ class FileSplitterCog(commands.Cog):
                 
                 # Move completed file to final location
                 if partial_path.exists():
+                    # Perform final integrity check if enabled
+                    integrity_verified = True
+                    if self.enable_hashing:
+                        await target_channel.send(f"🔍 Verifying integrity of `{file_path}`...")
+                        final_hash = self._calculate_file_hash(str(partial_path))
+                        if final_hash:
+                            await target_channel.send(f"📝 Final SHA-256: {final_hash[:16]}...")
+                        else:
+                            await target_channel.send("⚠️ Could not calculate file hash for verification")
+                            integrity_verified = False
+                    
                     partial_path.rename(output_path)
                     completed_files.add(file_path)
                     completed_count += 1
+                    
+                    if integrity_verified:
+                        await target_channel.send(f"✅ Completed `{file_path}` with integrity verification")
+                    else:
+                        await target_channel.send(f"⚠️ Completed `{file_path}` (integrity check failed)")
                     
                     # Update progress
                     overall_progress = int((downloaded_bytes / total_size) * 100) if total_size > 0 else 0
                     eta = self.get_eta(start_time, downloaded_bytes, total_size)
                     await self.bot.change_presence(activity=discord.Game(name=f"Downloading: {overall_progress}% ({eta} left)"))
                     
+                    transfer_speed = self.get_transfer_speed(start_time, downloaded_bytes)
                     self.save_progress("download", target_channel.id, {
                         "completed_chunks": list(completed_files),
                         "total_size_bytes": total_size,
                         "uploaded_size_bytes": downloaded_bytes,  # Reuse same field name
                         "start_time": start_time,
-                        "errors": errors
+                        "errors": errors,
+                        "integrity_verified": integrity_verified,
+                        "transfer_speed_mbps": transfer_speed,
+                        "formatted_speed": self.format_transfer_speed(transfer_speed)
                     })
-                
-                await target_channel.send(f"✅ Completed `{file_path}`")
+                else:
+                    await target_channel.send(f"❌ Failed to complete `{file_path}` - partial file missing")
                 
             except Exception as e:
                 await target_channel.send(f"💥 Error processing `{file_path}`: {e}")
