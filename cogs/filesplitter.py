@@ -13,6 +13,11 @@ import json
 import base64
 import urllib.parse
 import hashlib
+import logging
+import tempfile
+import shutil
+import stat
+from typing import Optional, Tuple, List, Dict, Any
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -71,71 +76,372 @@ class FileSplitterCog(commands.Cog):
             # Note: Generated encryption key - add to .env file as ENCRYPTION_KEY for consistent decryption
     
     def _encrypt_data(self, data):
-        """Encrypt data if encryption is enabled"""
-        if not self.encryption_enabled or not self.fernet:
+        """Encrypt data if encryption is enabled with comprehensive error handling"""
+        try:
+            if not self.encryption_enabled or not self.fernet:
+                return data
+                
+            if not data:
+                logging.warning("Attempting to encrypt empty data")
+                return data
+                
+            if isinstance(data, str):
+                data = data.encode('utf-8')
+                
+            return self.fernet.encrypt(data)
+            
+        except Exception as e:
+            logging.error(f"Encryption failed: {e}")
+            # Return original data if encryption fails - operation can continue
             return data
-        return self.fernet.encrypt(data)
     
     def _decrypt_data(self, encrypted_data):
-        """Decrypt data if encryption is enabled"""
-        if not self.encryption_enabled or not self.fernet:
+        """Decrypt data if encryption is enabled with comprehensive error handling"""
+        try:
+            if not self.encryption_enabled or not self.fernet:
+                return encrypted_data
+                
+            if not encrypted_data:
+                logging.warning("Attempting to decrypt empty data")
+                return encrypted_data
+                
+            return self.fernet.decrypt(encrypted_data)
+            
+        except Exception as e:
+            logging.error(f"Decryption failed: {e}")
+            # Return original data if decryption fails
             return encrypted_data
-        return self.fernet.decrypt(encrypted_data)
     
     def _calculate_file_hash(self, file_path):
-        """Calculate SHA-256 hash of a file"""
+        """Calculate SHA-256 hash of a file with comprehensive error handling"""
         if not self.enable_hashing:
             return None
         
         hash_sha256 = hashlib.sha256()
+        
         try:
+            path_obj = Path(file_path)
+            
+            if not path_obj.exists():
+                logging.warning(f"Cannot hash non-existent file: {file_path}")
+                return None
+                
+            if not path_obj.is_file():
+                logging.warning(f"Cannot hash non-file: {file_path}")
+                return None
+                
+            # Check file size before hashing
+            try:
+                file_size = path_obj.stat().st_size
+                if file_size > 10 * 1024 * 1024 * 1024:  # 10GB limit for hashing
+                    logging.warning(f"Skipping hash for very large file: {file_path} ({file_size / (1024**3):.2f}GB)")
+                    return "SKIPPED_TOO_LARGE"
+            except OSError as e:
+                logging.warning(f"Cannot get file size for hashing: {file_path}: {e}")
+                return None
+            
+            # Use larger chunks for better performance
+            chunk_size = 64 * 1024  # 64KB chunks
+            bytes_processed = 0
+            
             with open(file_path, "rb") as f:
-                for chunk in iter(lambda: f.read(4096), b""):
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
                     hash_sha256.update(chunk)
+                    bytes_processed += len(chunk)
+                    
+                    # Progress logging for very large files
+                    if bytes_processed % (100 * 1024 * 1024) == 0:  # Every 100MB
+                        logging.debug(f"Hashing progress: {bytes_processed / (1024**2):.1f}MB processed")
+                        
             return hash_sha256.hexdigest()
-        except Exception:
+            
+        except PermissionError:
+            logging.warning(f"Permission denied while hashing file: {file_path}")
+            return None
+        except IOError as e:
+            logging.warning(f"IO error while hashing file {file_path}: {e}")
+            return None
+        except Exception as e:
+            logging.error(f"Unexpected error while hashing file {file_path}: {e}")
             return None
     
     def _calculate_chunk_hash(self, data):
-        """Calculate SHA-256 hash of chunk data"""
+        """Calculate SHA-256 hash of chunk data with error handling"""
         if not self.enable_hashing:
             return None
-        return hashlib.sha256(data).hexdigest()
+            
+        try:
+            if not data:
+                return None
+                
+            if isinstance(data, str):
+                data = data.encode('utf-8')
+                
+            return hashlib.sha256(data).hexdigest()
+            
+        except Exception as e:
+            logging.warning(f"Error calculating chunk hash: {e}")
+            return None
     
     def _get_retry_delay(self, attempt_number):
         """Calculate exponential backoff delay for retries"""
-        return min(30, (self.retry_backoff_factor ** attempt_number))
+        import random
+        # Add jitter to prevent thundering herd
+        base_delay = min(30, (self.retry_backoff_factor ** attempt_number))
+        jitter = random.uniform(0.1, 0.3) * base_delay
+        return base_delay + jitter
+
+    def _validate_path_input(self, file_path: str) -> Tuple[bool, str, Optional[Path]]:
+        """
+        Comprehensive path validation with security checks.
+        Returns: (is_valid, error_message, resolved_path)
+        """
+        try:
+            if not file_path or not file_path.strip():
+                return False, "File path cannot be empty", None
+            
+            # Sanitize and resolve path
+            path_str = file_path.strip()
+            
+            # Check for dangerous path patterns
+            dangerous_patterns = ['..', '~/', '/etc/', '/proc/', '/sys/', '/dev/', 'C:\\Windows', 'C:\\System32']
+            for pattern in dangerous_patterns:
+                if pattern in path_str:
+                    return False, f"Potentially dangerous path pattern detected: {pattern}", None
+            
+            try:
+                resolved_path = Path(path_str).resolve()
+            except (OSError, ValueError) as e:
+                return False, f"Invalid path format: {str(e)}", None
+            
+            # Check if path exists
+            if not resolved_path.exists():
+                return False, f"Path does not exist: {resolved_path}", None
+            
+            # Check read permissions
+            try:
+                if not os.access(resolved_path, os.R_OK):
+                    return False, f"No read permission for path: {resolved_path}", None
+            except OSError as e:
+                return False, f"Cannot check permissions for path: {str(e)}", None
+            
+            # Check file size limits (25GB max for safety)
+            if resolved_path.is_file():
+                max_size = 25 * 1024 * 1024 * 1024  # 25GB
+                try:
+                    size = resolved_path.stat().st_size
+                    if size > max_size:
+                        return False, f"File too large: {size / (1024**3):.2f}GB (max: 25GB)", None
+                except OSError as e:
+                    return False, f"Cannot get file size: {str(e)}", None
+            elif resolved_path.is_dir():
+                # For directories, do a quick size check
+                try:
+                    total_size = self.calculate_directory_size(str(resolved_path))
+                    max_dir_size = 100 * 1024 * 1024 * 1024  # 100GB max for directories
+                    if total_size > max_dir_size:
+                        return False, f"Directory too large: {total_size / (1024**3):.2f}GB (max: 100GB)", None
+                except Exception as e:
+                    # Log warning but don't fail - size check is advisory
+                    logging.warning(f"Could not calculate directory size: {e}")
+            
+            return True, "", resolved_path
+            
+        except Exception as e:
+            return False, f"Unexpected error validating path: {str(e)}", None
+
+    def _validate_channel_name(self, channel_name: Optional[str]) -> Tuple[bool, str, Optional[str]]:
+        """
+        Validate and sanitize channel name.
+        Returns: (is_valid, error_message, sanitized_name)
+        """
+        try:
+            if not channel_name:
+                return True, "", None
+            
+            if not channel_name.strip():
+                return False, "Channel name cannot be empty", None
+            
+            sanitized = channel_name.strip()
+            
+            # Discord channel name restrictions
+            if len(sanitized) > 100:
+                return False, "Channel name too long (max 100 characters)", None
+            
+            if len(sanitized) < 1:
+                return False, "Channel name too short", None
+            
+            # Remove invalid characters and convert to lowercase
+            import string
+            allowed_chars = string.ascii_lowercase + string.digits + '-_'
+            sanitized = ''.join(c if c in allowed_chars else '-' for c in sanitized.lower())
+            
+            # Remove consecutive dashes and trim
+            sanitized = re.sub(r'-+', '-', sanitized).strip('-')
+            
+            if not sanitized:
+                return False, "Channel name contains no valid characters", None
+            
+            return True, "", sanitized
+            
+        except Exception as e:
+            return False, f"Unexpected error validating channel name: {str(e)}", None
+
+    def _safe_create_channel(self, guild, name: str) -> Tuple[bool, str, Optional[discord.TextChannel]]:
+        """
+        Safely create a Discord channel with error handling.
+        Returns: (success, error_message, channel)
+        """
+        try:
+            # Additional channel name cleanup
+            safe_name = name[:97] + "..." if len(name) > 100 else name
+            safe_name = re.sub(r'[^a-z0-9\-_]', '-', safe_name.lower())
+            safe_name = re.sub(r'-+', '-', safe_name).strip('-')
+            
+            if not safe_name:
+                safe_name = "file-upload"
+            
+            return True, "", None  # Will be handled by actual async call
+            
+        except Exception as e:
+            return False, f"Error preparing channel creation: {str(e)}", None
+
+    def _cleanup_temp_resources(self, temp_files: List[str] = None, temp_dirs: List[str] = None):
+        """Safely cleanup temporary files and directories"""
+        try:
+            if temp_files:
+                for temp_file in temp_files:
+                    try:
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+                    except Exception as e:
+                        logging.warning(f"Failed to cleanup temp file {temp_file}: {e}")
+            
+            if temp_dirs:
+                for temp_dir in temp_dirs:
+                    try:
+                        if os.path.exists(temp_dir):
+                            shutil.rmtree(temp_dir)
+                    except Exception as e:
+                        logging.warning(f"Failed to cleanup temp directory {temp_dir}: {e}")
+                        
+        except Exception as e:
+            logging.error(f"Error during cleanup: {e}")
 
     def is_folder(self, path):
-        return os.path.isdir(path)
+        """Check if path is a directory with enhanced error handling"""
+        try:
+            return os.path.isdir(path)
+        except (OSError, TypeError):
+            return False
 
     def get_all_files_in_folder(self, folder_path):
-        """Get all files in a folder with their relative paths preserved"""
+        """Get all files in a folder with their relative paths preserved and comprehensive error handling"""
         all_files = []
-        folder_path = Path(folder_path).resolve()
-        folder_name = folder_path.name
         
-        for root, dirs, files in os.walk(folder_path):
-            for file in files:
-                abs_path = Path(root) / file
-                rel_path_from_folder = abs_path.relative_to(folder_path)
-                full_rel_path = Path(folder_name) / rel_path_from_folder
-                all_files.append((str(abs_path), str(full_rel_path).replace("\\", "/")))
+        try:
+            folder_path = Path(folder_path).resolve()
+            folder_name = folder_path.name
+            
+            if not folder_path.exists() or not folder_path.is_dir():
+                logging.error(f"Invalid folder path: {folder_path}")
+                return all_files
+            
+            file_count = 0
+            max_files = 10000  # Safety limit
+            
+            for root, dirs, files in os.walk(folder_path):
+                # Filter out inaccessible directories
+                dirs[:] = [d for d in dirs if os.access(os.path.join(root, d), os.R_OK)]
+                
+                for file in files:
+                    if file_count >= max_files:
+                        logging.warning(f"File count limit reached ({max_files}), stopping enumeration")
+                        break
+                        
+                    try:
+                        abs_path = Path(root) / file
+                        
+                        # Skip if file is not readable
+                        if not os.access(abs_path, os.R_OK):
+                            logging.warning(f"Skipping unreadable file: {abs_path}")
+                            continue
+                        
+                        # Skip very large files (per-file limit)
+                        try:
+                            size = abs_path.stat().st_size
+                            if size > 5 * 1024 * 1024 * 1024:  # 5GB per file
+                                logging.warning(f"Skipping very large file: {abs_path} ({size / (1024**3):.2f}GB)")
+                                continue
+                        except OSError:
+                            logging.warning(f"Cannot get size for file: {abs_path}")
+                            continue
+                        
+                        rel_path_from_folder = abs_path.relative_to(folder_path)
+                        full_rel_path = Path(folder_name) / rel_path_from_folder
+                        all_files.append((str(abs_path), str(full_rel_path).replace("\\", "/")))
+                        file_count += 1
+                        
+                    except (OSError, ValueError) as e:
+                        logging.warning(f"Error processing file {file} in {root}: {e}")
+                        continue
+                        
+                if file_count >= max_files:
+                    break
+                    
+        except Exception as e:
+            logging.error(f"Error walking directory {folder_path}: {e}")
+            
         return all_files
 
     def calculate_directory_size(self, path):
-        """Calculate total size of directory or file in bytes"""
-        if os.path.isfile(path):
-            return os.path.getsize(path)
-        
+        """Calculate total size of directory or file in bytes with enhanced error handling"""
         total_size = 0
-        for root, dirs, files in os.walk(path):
-            for file in files:
-                file_path = os.path.join(root, file)
+        
+        try:
+            path_obj = Path(path)
+            
+            if path_obj.is_file():
                 try:
-                    total_size += os.path.getsize(file_path)
-                except (OSError, IOError):
-                    pass  # Skip files that can't be accessed
+                    return path_obj.stat().st_size
+                except OSError as e:
+                    logging.warning(f"Cannot get size of file {path}: {e}")
+                    return 0
+            
+            if not path_obj.is_dir():
+                logging.warning(f"Path is neither file nor directory: {path}")
+                return 0
+                
+            file_count = 0
+            max_files = 10000  # Safety limit
+            
+            for root, dirs, files in os.walk(path):
+                # Filter out inaccessible directories
+                dirs[:] = [d for d in dirs if os.access(os.path.join(root, d), os.R_OK)]
+                
+                for file in files:
+                    if file_count >= max_files:
+                        logging.warning(f"File count limit reached ({max_files}) during size calculation")
+                        break
+                        
+                    file_path = os.path.join(root, file)
+                    try:
+                        if os.access(file_path, os.R_OK):
+                            total_size += os.path.getsize(file_path)
+                        file_count += 1
+                    except (OSError, IOError) as e:
+                        logging.warning(f"Cannot get size of {file_path}: {e}")
+                        continue
+                        
+                if file_count >= max_files:
+                    break
+                    
+        except Exception as e:
+            logging.error(f"Error calculating directory size for {path}: {e}")
+            
         return total_size
 
     def encode_path_for_filename(self, path):
@@ -155,22 +461,53 @@ class FileSplitterCog(commands.Cog):
             return encoded_path
 
     def load_progress(self, transfer_type, channel_id):
-        if not os.path.exists(PROGRESS_FILE):
-            return {}
+        """Load progress data with enhanced error handling"""
         try:
-            with open(PROGRESS_FILE, "r") as f:
+            if not os.path.exists(PROGRESS_FILE):
+                return {}
+                
+            # Check if file is readable
+            if not os.access(PROGRESS_FILE, os.R_OK):
+                logging.warning(f"Cannot read progress file: {PROGRESS_FILE}")
+                return {}
+                
+            with open(PROGRESS_FILE, "r", encoding='utf-8') as f:
                 all_progress = json.load(f)
-            return all_progress.get(f"{transfer_type}_{channel_id}", {})
-        except Exception:
+                
+            key = f"{transfer_type}_{channel_id}"
+            return all_progress.get(key, {})
+            
+        except json.JSONDecodeError as e:
+            logging.error(f"Invalid JSON in progress file: {e}")
+            # Try to backup corrupted file
+            try:
+                backup_name = f"{PROGRESS_FILE}.backup.{int(time.time())}"
+                shutil.copy2(PROGRESS_FILE, backup_name)
+                logging.info(f"Backed up corrupted progress file to: {backup_name}")
+            except Exception:
+                pass
+            return {}
+        except Exception as e:
+            logging.error(f"Error loading progress: {e}")
             return {}
 
     def save_progress(self, transfer_type, channel_id, progress_data):
+        """Save progress data with atomic operations and enhanced error handling"""
         try:
+            # Read existing data
+            all_progress = {}
             if os.path.exists(PROGRESS_FILE):
-                with open(PROGRESS_FILE, "r") as f:
-                    all_progress = json.load(f)
-            else:
-                all_progress = {}
+                try:
+                    with open(PROGRESS_FILE, "r", encoding='utf-8') as f:
+                        all_progress = json.load(f)
+                except (json.JSONDecodeError, IOError) as e:
+                    logging.warning(f"Could not read existing progress file: {e}")
+                    all_progress = {}
+            
+            # Validate progress data
+            if not isinstance(progress_data, dict):
+                logging.error("Progress data must be a dictionary")
+                return False
                 
             # Enhance progress data with additional metadata
             enhanced_data = progress_data.copy()
@@ -179,15 +516,84 @@ class FileSplitterCog(commands.Cog):
                 "chunk_size_mb": self.max_chunk_size // (1024 * 1024),
                 "encryption_enabled": self.encryption_enabled,
                 "hashing_enabled": self.enable_hashing,
-                "transfer_type": transfer_type
+                "transfer_type": transfer_type,
+                "version": "1.0"  # For future compatibility
             })
             
-            all_progress[f"{transfer_type}_{channel_id}"] = enhanced_data
-            with open(PROGRESS_FILE, "w") as f:
-                json.dump(all_progress, f, indent=2)
+            # Update progress
+            key = f"{transfer_type}_{channel_id}"
+            all_progress[key] = enhanced_data
+            
+            # Atomic write using temporary file
+            temp_file = f"{PROGRESS_FILE}.tmp.{int(time.time())}.{os.getpid()}"
+            try:
+                with open(temp_file, "w", encoding='utf-8') as f:
+                    json.dump(all_progress, f, indent=2, ensure_ascii=False)
+                
+                # Atomic move
+                if os.name == 'nt':  # Windows
+                    if os.path.exists(PROGRESS_FILE):
+                        os.remove(PROGRESS_FILE)
+                    os.rename(temp_file, PROGRESS_FILE)
+                else:  # Unix-like
+                    os.rename(temp_file, PROGRESS_FILE)
+                    
+                return True
+                
+            except Exception as e:
+                logging.error(f"Error writing progress file: {e}")
+                # Cleanup temp file
+                try:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                except Exception:
+                    pass
+                return False
+                
         except Exception as e:
-            # Silent error handling for progress save
-            pass
+            logging.error(f"Error saving progress: {e}")
+            return False
+
+    def clear_progress(self, transfer_type, channel_id):
+        """Clear progress data with enhanced error handling"""
+        try:
+            if not os.path.exists(PROGRESS_FILE):
+                return True
+                
+            with open(PROGRESS_FILE, "r", encoding='utf-8') as f:
+                all_progress = json.load(f)
+            
+            key = f"{transfer_type}_{channel_id}"
+            if key in all_progress:
+                del all_progress[key]
+                
+                # Atomic write
+                temp_file = f"{PROGRESS_FILE}.tmp.{int(time.time())}.{os.getpid()}"
+                try:
+                    with open(temp_file, "w", encoding='utf-8') as f:
+                        json.dump(all_progress, f, indent=2, ensure_ascii=False)
+                    
+                    if os.name == 'nt':  # Windows
+                        if os.path.exists(PROGRESS_FILE):
+                            os.remove(PROGRESS_FILE)
+                        os.rename(temp_file, PROGRESS_FILE)
+                    else:  # Unix-like
+                        os.rename(temp_file, PROGRESS_FILE)
+                        
+                except Exception as e:
+                    logging.error(f"Error clearing progress: {e}")
+                    try:
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+                    except Exception:
+                        pass
+                    return False
+                    
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error clearing progress: {e}")
+            return False
 
     def _create_consolidated_files(self, file_list):
         """Group small files into consolidated chunks and return processing plan"""
@@ -362,235 +768,340 @@ class FileSplitterCog(commands.Cog):
     @app_commands.describe(file_path="The full path to the file or folder to upload.")
     @app_commands.describe(channel_name="The name of the channel for the upload (optional).")
     async def upload_file(self, interaction: discord.Interaction, file_path: str, channel_name: str = None):
-        absolute_path = Path(file_path).resolve()
-        await interaction.response.send_message(f"Starting to process path: `{absolute_path}`...", ephemeral=True)
-
-        if not absolute_path.exists():
-            await interaction.followup.send(f"Error: The path `{absolute_path}` does not exist.", ephemeral=True)
+        # Comprehensive input validation
+        path_valid, path_error, absolute_path = self._validate_path_input(file_path)
+        if not path_valid:
+            await interaction.response.send_message(f"❌ **Path Error:** {path_error}", ephemeral=True)
             return
-
-        is_folder = self.is_folder(absolute_path)
-        original_name = absolute_path.name
-        sanitized_name = channel_name.lower().replace(' ', '-') if channel_name else original_name.lower().replace('.', '-').replace('_', '-')
-
+        
+        channel_valid, channel_error, sanitized_channel_name = self._validate_channel_name(channel_name)
+        if not channel_valid:
+            await interaction.response.send_message(f"❌ **Channel Name Error:** {channel_error}", ephemeral=True)
+            return
+        
+        # Initial response
+        await interaction.response.send_message(f"✅ **Validation complete.** Processing path: `{absolute_path}`...", ephemeral=True)
+        
         try:
-            new_channel = await interaction.guild.create_text_channel(name=sanitized_name)
-            self.uploaded_files[original_name] = new_channel.id
-            await interaction.followup.send(f"Created channel {new_channel.mention} for the upload.", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"Failed to create channel: {e}", ephemeral=True)
-            return
-
-        await new_channel.send(f"🚀 Starting upload of `{original_name}`{' (folder)' if is_folder else ''}...")
-
-        # Calculate total directory size
-        total_size_bytes = self.calculate_directory_size(str(absolute_path))
-        await new_channel.send(f"📊 Total size: {total_size_bytes / (1024*1024*1024):.2f} GB")
-
-        # Build file list with proper relative paths
-        file_list = []
-        if is_folder:
-            file_list = self.get_all_files_in_folder(str(absolute_path))
-            await new_channel.send(f"📁 Found {len(file_list)} files in folder structure:")
-            for i, (abs_path, rel_path) in enumerate(file_list[:3]):
-                await new_channel.send(f"   📄 {rel_path}")
-            if len(file_list) > 3:
-                await new_channel.send(f"   ... and {len(file_list) - 3} more files")
-        else:
-            file_list = [(str(absolute_path), original_name)]
-
-        # Group files for consolidation
-        consolidated_groups, large_files = self._create_consolidated_files(file_list)
-        
-        # Calculate total chunks needed
-        chunk_index_map = []
-        
-        # Add consolidated chunks (each group becomes 1 chunk)
-        for i, group in enumerate(consolidated_groups):
-            group_paths = [rel_path for _, rel_path, _ in group]
-            chunk_index_map.append(("consolidated", i+1, len(consolidated_groups), group_paths))
-        
-        # Add large file chunks (processed individually)
-        for abs_path, rel_path, file_size in large_files:
-            total_parts = (file_size + self.max_chunk_size - 1) // self.max_chunk_size
-            chunk_index_map.extend([(rel_path, i+1, total_parts, None) for i in range(total_parts)])
-        
-        total_chunks = len(chunk_index_map)
-
-        progress_data = self.load_progress("upload", new_channel.id)
-        completed_chunks = set(progress_data.get("completed_chunks", []))
-        last_percentage = 0
-        start_time = time.time() if not progress_data.get("start_time") else progress_data["start_time"]
-        errors = progress_data.get("errors", [])
-        uploaded_bytes = progress_data.get("uploaded_size_bytes", 0)
-
-        await new_channel.send(f"📊 Total chunks to upload: {total_chunks}")
-        if consolidated_groups:
-            await new_channel.send(f"📦 Consolidating {sum(len(group) for group in consolidated_groups)} small files into {len(consolidated_groups)} chunks")
-
-        # Upload consolidated chunks first
-        for i, file_group in enumerate(consolidated_groups):
-            consolidated_chunk_id = f"consolidated_chunk_{i+1}_of_{len(consolidated_groups)}"
+            # Determine if folder and get basic info
+            is_folder = self.is_folder(absolute_path)
+            original_name = absolute_path.name
             
-            if consolidated_chunk_id in completed_chunks:
-                continue
-                
-            try:
-                # Create consolidated chunk data
-                chunk_data, file_metadata = self._create_consolidated_chunk_data(file_group)
-                group_size = len(chunk_data)
-                
-                file_paths = [rel_path for _, rel_path, _ in file_group]
-                await new_channel.send(f"📦 Creating consolidated chunk {i+1}/{len(consolidated_groups)} ({group_size:,} bytes, {len(file_group)} files):")
-                for _, rel_path, file_size in file_group[:3]:
-                    await new_channel.send(f"   📄 {rel_path} ({file_size:,} bytes)")
-                if len(file_group) > 3:
-                    await new_channel.send(f"   ... and {len(file_group) - 3} more files")
-                
-                # Calculate hash before encryption
-                chunk_hash = self._calculate_chunk_hash(chunk_data) if self.enable_hashing else None
-                
-                # Encrypt chunk if encryption is enabled  
-                processed_chunk = self._encrypt_data(chunk_data)
-                
-                # Create enhanced filename with metadata
-                metadata_suffix = ".consolidated"
-                if chunk_hash:
-                    metadata_suffix += f".sha256_{chunk_hash[:16]}"
-                if self.encryption_enabled:
-                    metadata_suffix += ".enc"
-                
-                enhanced_chunk_id = f"{consolidated_chunk_id}{metadata_suffix}"
-                chunk_file = discord.File(fp=io.BytesIO(processed_chunk), filename=enhanced_chunk_id)
-                
-                upload_msg = f"📦 Consolidated chunk {i+1}/{len(consolidated_groups)} ({len(file_group)} files)"
-                if self.encryption_enabled:
-                    upload_msg += " 🔐"
-                if chunk_hash:
-                    upload_msg += " ✓"
+            # Create sanitized channel name
+            if sanitized_channel_name:
+                final_channel_name = sanitized_channel_name
+            else:
+                final_channel_name = original_name.lower().replace('.', '-').replace('_', '-')[:97]
+                final_channel_name = re.sub(r'[^a-z0-9\-]', '-', final_channel_name)
+                final_channel_name = re.sub(r'-+', '-', final_channel_name).strip('-')
+                if not final_channel_name:
+                    final_channel_name = "file-upload"
+            
+            # Create Discord channel with enhanced error handling
+            new_channel = None
+            max_channel_attempts = 3
+            
+            for attempt in range(max_channel_attempts):
+                try:
+                    # Add attempt suffix if not first try
+                    channel_name_attempt = final_channel_name
+                    if attempt > 0:
+                        channel_name_attempt = f"{final_channel_name}-{attempt + 1}"
+                        
+                    new_channel = await interaction.guild.create_text_channel(name=channel_name_attempt)
+                    self.uploaded_files[original_name] = new_channel.id
+                    break
                     
-                retries = self.max_retry_attempts
-                while retries > 0:
-                    try:
-                        await new_channel.send(upload_msg, file=chunk_file)
-                        await asyncio.sleep(1)
-                        completed_chunks.add(consolidated_chunk_id)
-                        uploaded_bytes += group_size
-                        break
-                    except discord.errors.HTTPException as e:
-                        retries -= 1
-                        delay = self._get_retry_delay(self.max_retry_attempts - retries)
-                        await new_channel.send(f"❌ Error with consolidated chunk {i+1}: {e}. Retrying in {delay}s... ({retries} left)")
-                        await asyncio.sleep(delay)
-                    except Exception as e:
-                        await new_channel.send(f"💥 Unexpected error: {e}")
-                        retries = 0
-                        
-            except Exception as e:
-                await new_channel.send(f"❌ Failed to create consolidated chunk {i+1}: {e}")
-                errors.append(f"Consolidated chunk {i+1}: {e}")
-
-        # Upload large files (processed individually)
-        for abs_path, rel_path, file_size in large_files:
-            total_parts = (file_size + self.max_chunk_size - 1) // self.max_chunk_size
-            await new_channel.send(f"⬆️ Uploading `{rel_path}` ({file_size:,} bytes, {total_parts} parts)...")
+                except discord.errors.HTTPException as e:
+                    if attempt == max_channel_attempts - 1:
+                        await interaction.followup.send(f"❌ **Channel Creation Failed:** {e}", ephemeral=True)
+                        return
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    
+                except Exception as e:
+                    await interaction.followup.send(f"❌ **Unexpected Error Creating Channel:** {e}", ephemeral=True)
+                    return
             
+            if not new_channel:
+                await interaction.followup.send("❌ **Failed to create upload channel after multiple attempts.**", ephemeral=True)
+                return
+            
+            await interaction.followup.send(f"✅ **Channel created:** {new_channel.mention}", ephemeral=True)
+            
+            # Send initial upload message with safety checks
             try:
-                async with aiofiles.open(abs_path, "rb") as f:
-                    for i in range(total_parts):
-                        encoded_path = self.encode_path_for_filename(rel_path)
-                        chunk_id = f"{encoded_path}.part_{i+1}_of_{total_parts}"
-                        if i == 0:
-                            await new_channel.send(f"🔧 Encoding `{rel_path}` → `{encoded_path}`")
-                        if chunk_id in completed_chunks:
-                            continue
-                        if (i + 1) % 50 == 0:
-                            await asyncio.sleep(5)
-                        retries = self.max_retry_attempts
-                        chunk_uploaded_flag = False
-                        while retries > 0:
-                            try:
-                                chunk = await f.read(self.max_chunk_size)
-                                if not chunk:
-                                    break
-                                
-                                # Calculate hash before encryption
-                                chunk_hash = self._calculate_chunk_hash(chunk) if self.enable_hashing else None
-                                
-                                # Encrypt chunk if encryption is enabled  
-                                processed_chunk = self._encrypt_data(chunk)
-                                
-                                # Create enhanced filename with metadata
-                                metadata_suffix = ""
-                                if chunk_hash:
-                                    metadata_suffix += f".sha256_{chunk_hash[:16]}"
-                                if self.encryption_enabled:
-                                    metadata_suffix += ".enc"
-                                
-                                enhanced_chunk_id = f"{chunk_id}{metadata_suffix}"
-                                chunk_file = discord.File(fp=io.BytesIO(processed_chunk), filename=enhanced_chunk_id)
-                                
-                                upload_msg = f"📦 `{rel_path}` - Part {i+1}/{total_parts}"
-                                if self.encryption_enabled:
-                                    upload_msg += " 🔐"
-                                if chunk_hash:
-                                    upload_msg += " ✓"
-                                    
-                                await new_channel.send(upload_msg, file=chunk_file)
-                                await asyncio.sleep(1)
-                                chunk_uploaded_flag = True
-                                uploaded_bytes += len(chunk)  # Track original bytes uploaded
-                                break
-                            except discord.errors.HTTPException as e:
-                                retries -= 1
-                                delay = self._get_retry_delay(self.max_retry_attempts - retries)
-                                await new_channel.send(f"❌ Error with part {i+1}: {e}. Retrying in {delay}s... ({retries} left)")
-                                await asyncio.sleep(delay)
-                            except Exception as e:
-                                await new_channel.send(f"💥 Unexpected error: {e}")
-                                retries = 0
-                        if not chunk_uploaded_flag:
-                            await new_channel.send(f"🔴 Upload failed for `{rel_path}` part {i+1}. File incomplete.")
-                            errors.append(chunk_id)
-                            continue
-                        completed_chunks.add(chunk_id)
-                        
-                        # Calculate percentage based on bytes, not chunks
-                        byte_percentage = int((uploaded_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
-                        eta = self.get_eta(start_time, uploaded_bytes, total_size_bytes)
-                        
-                        if byte_percentage // 5 > last_percentage // 5 or byte_percentage == 100:
-                            await self.bot.change_presence(activity=discord.Game(name=f"Uploading: {byte_percentage}% ({eta} left)"))
-                            last_percentage = byte_percentage
-                            
-                        transfer_speed = self.get_transfer_speed(start_time, uploaded_bytes)
-                        self.save_progress("upload", new_channel.id, {
-                            "completed_chunks": list(completed_chunks),
-                            "total_size_bytes": total_size_bytes,
-                            "uploaded_size_bytes": uploaded_bytes,
-                            "start_time": start_time,
-                            "errors": errors,
-                            "transfer_speed_mbps": transfer_speed,
-                            "formatted_speed": self.format_transfer_speed(transfer_speed)
-                        })
-                await new_channel.send(f"✅ Upload complete for `{rel_path}`.")
+                await new_channel.send(f"🚀 **Starting upload of** `{original_name}`{' (folder)' if is_folder else ''}...")
+                await new_channel.send(f"🔧 **Configuration:** Chunk size: {self.max_chunk_size // (1024*1024)}MB, "
+                                     f"Encryption: {'✅' if self.encryption_enabled else '❌'}, "
+                                     f"Hashing: {'✅' if self.enable_hashing else '❌'}")
             except Exception as e:
-                await new_channel.send(f"💥 Error during upload of `{rel_path}`: {e}")
-                errors.append(f"{rel_path}: {e}")
+                logging.error(f"Failed to send initial upload messages: {e}")
+                # Continue anyway - this is not critical
+            
+            # Calculate total directory size with timeout protection
+            try:
+                await new_channel.send("📊 **Calculating total size...** (This may take a moment for large directories)")
+                total_size_bytes = self.calculate_directory_size(str(absolute_path))
+                
+                if total_size_bytes == 0:
+                    await new_channel.send("⚠️ **Warning:** Could not calculate size or directory is empty")
+                else:
+                    await new_channel.send(f"📊 **Total size:** {total_size_bytes / (1024*1024*1024):.2f} GB")
+                    
+            except Exception as e:
+                logging.error(f"Error calculating directory size: {e}")
+                await new_channel.send(f"⚠️ **Size calculation failed:** {e}")
+                total_size_bytes = 0  # Continue with unknown size
+            
+            # Build file list with comprehensive error handling
+            file_list = []
+            try:
+                if is_folder:
+                    await new_channel.send("📁 **Scanning folder structure...** (Large folders may take time)")
+                    file_list = self.get_all_files_in_folder(str(absolute_path))
+                    
+                    if not file_list:
+                        await new_channel.send("❌ **No accessible files found in the folder.**")
+                        return
+                        
+                    await new_channel.send(f"📁 **Found {len(file_list)} accessible files:**")
+                    
+                    # Show first few files
+                    for i, (abs_path, rel_path) in enumerate(file_list[:3]):
+                        try:
+                            file_size = os.path.getsize(abs_path)
+                            await new_channel.send(f"   📄 `{rel_path}` ({file_size / (1024*1024):.2f} MB)")
+                        except Exception:
+                            await new_channel.send(f"   📄 `{rel_path}` (size unknown)")
+                            
+                    if len(file_list) > 3:
+                        await new_channel.send(f"   ... and {len(file_list) - 3} more files")
+                else:
+                    # Single file
+                    file_list = [(str(absolute_path), original_name)]
+                    file_size = absolute_path.stat().st_size
+                    await new_channel.send(f"📄 **Single file:** `{original_name}` ({file_size / (1024*1024):.2f} MB)")
+                    
+            except Exception as e:
+                logging.error(f"Error building file list: {e}")
+                await new_channel.send(f"❌ **Error scanning files:** {e}")
+                return
+            
+            # Continue with upload process wrapped in comprehensive error handling
+            try:
+                # Group files for consolidation
+                consolidated_groups, large_files = self._create_consolidated_files(file_list)
+                
+                # Calculate total chunks needed
+                chunk_index_map = []
+                
+                # Add consolidated chunks (each group becomes 1 chunk)
+                for i, group in enumerate(consolidated_groups):
+                    group_paths = [rel_path for _, rel_path, _ in group]
+                    chunk_index_map.append(("consolidated", i+1, len(consolidated_groups), group_paths))
+                
+                # Add large file chunks (processed individually)
+                for abs_path, rel_path, file_size in large_files:
+                    total_parts = (file_size + self.max_chunk_size - 1) // self.max_chunk_size
+                    chunk_index_map.extend([(rel_path, i+1, total_parts, None) for i in range(total_parts)])
+            
+                    total_chunks = len(chunk_index_map)
 
-        elapsed = int(time.time() - start_time)
-        final_percentage = int((uploaded_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 100
-        self.clear_progress("upload", new_channel.id)
-        await new_channel.send(
-            f"🎉 **Upload Complete!** `{original_name}`\n"
-            f"📊 Total size: {total_size_bytes / (1024*1024*1024):.2f} GB\n"
-            f"📊 Uploaded: {uploaded_bytes / (1024*1024*1024):.2f} GB ({final_percentage}%)\n"
-            f"📊 Total chunks: {total_chunks:,}\n"
-            f"❌ Errors: {len(errors)}\n"
-            f"⏱️ Time: {elapsed//60}m {elapsed%60}s\n"
-            f"{'🔴 Failed chunks: ' + ', '.join(errors[:5]) + ('...' if len(errors) > 5 else '') if errors else '🟢 All chunks uploaded successfully!'}"
-        )
-        await self.bot.change_presence(activity=discord.Game(name="Idle"))
+                    progress_data = self.load_progress("upload", new_channel.id)
+                    completed_chunks = set(progress_data.get("completed_chunks", []))
+                    last_percentage = 0
+                    start_time = time.time() if not progress_data.get("start_time") else progress_data["start_time"]
+                    errors = progress_data.get("errors", [])
+                    uploaded_bytes = progress_data.get("uploaded_size_bytes", 0)
+
+                    await new_channel.send(f"📊 Total chunks to upload: {total_chunks}")
+                    if consolidated_groups:
+                        await new_channel.send(f"📦 Consolidating {sum(len(group) for group in consolidated_groups)} small files into {len(consolidated_groups)} chunks")
+
+                    # Upload consolidated chunks first
+                    for i, file_group in enumerate(consolidated_groups):
+                        consolidated_chunk_id = f"consolidated_chunk_{i+1}_of_{len(consolidated_groups)}"
+                        
+                        if consolidated_chunk_id in completed_chunks:
+                            continue
+                            
+                        try:
+                            # Create consolidated chunk data
+                            chunk_data, file_metadata = self._create_consolidated_chunk_data(file_group)
+                            group_size = len(chunk_data)
+                            
+                            file_paths = [rel_path for _, rel_path, _ in file_group]
+                            await new_channel.send(f"📦 Creating consolidated chunk {i+1}/{len(consolidated_groups)} ({group_size:,} bytes, {len(file_group)} files):")
+                            for _, rel_path, file_size in file_group[:3]:
+                                await new_channel.send(f"   📄 {rel_path} ({file_size:,} bytes)")
+                            if len(file_group) > 3:
+                                await new_channel.send(f"   ... and {len(file_group) - 3} more files")
+                            
+                            # Calculate hash before encryption
+                            chunk_hash = self._calculate_chunk_hash(chunk_data) if self.enable_hashing else None
+                            
+                            # Encrypt chunk if encryption is enabled  
+                            processed_chunk = self._encrypt_data(chunk_data)
+                            
+                            # Create enhanced filename with metadata
+                            metadata_suffix = ".consolidated"
+                            if chunk_hash:
+                                metadata_suffix += f".sha256_{chunk_hash[:16]}"
+                            if self.encryption_enabled:
+                                metadata_suffix += ".enc"
+                            
+                            enhanced_chunk_id = f"{consolidated_chunk_id}{metadata_suffix}"
+                            chunk_file = discord.File(fp=io.BytesIO(processed_chunk), filename=enhanced_chunk_id)
+                            
+                            upload_msg = f"📦 Consolidated chunk {i+1}/{len(consolidated_groups)} ({len(file_group)} files)"
+                            if self.encryption_enabled:
+                                upload_msg += " 🔐"
+                            if chunk_hash:
+                                upload_msg += " ✓"
+                                
+                            retries = self.max_retry_attempts
+                            while retries > 0:
+                                try:
+                                    await new_channel.send(upload_msg, file=chunk_file)
+                                    await asyncio.sleep(1)
+                                    completed_chunks.add(consolidated_chunk_id)
+                                    uploaded_bytes += group_size
+                                    break
+                                except discord.errors.HTTPException as e:
+                                    retries -= 1
+                                    delay = self._get_retry_delay(self.max_retry_attempts - retries)
+                                    await new_channel.send(f"❌ Error with consolidated chunk {i+1}: {e}. Retrying in {delay}s... ({retries} left)")
+                                    await asyncio.sleep(delay)
+                                except Exception as e:
+                                    await new_channel.send(f"💥 Unexpected error: {e}")
+                                    retries = 0
+                                    
+                        except Exception as e:
+                            await new_channel.send(f"❌ Failed to create consolidated chunk {i+1}: {e}")
+                            errors.append(f"Consolidated chunk {i+1}: {e}")
+
+                    # Upload large files (processed individually)
+                    for abs_path, rel_path, file_size in large_files:
+                        total_parts = (file_size + self.max_chunk_size - 1) // self.max_chunk_size
+                        await new_channel.send(f"⬆️ Uploading `{rel_path}` ({file_size:,} bytes, {total_parts} parts)...")
+                        
+                        try:
+                            async with aiofiles.open(abs_path, "rb") as f:
+                                for i in range(total_parts):
+                                    encoded_path = self.encode_path_for_filename(rel_path)
+                                    chunk_id = f"{encoded_path}.part_{i+1}_of_{total_parts}"
+                                    if i == 0:
+                                        await new_channel.send(f"🔧 Encoding `{rel_path}` → `{encoded_path}`")
+                                    if chunk_id in completed_chunks:
+                                        continue
+                                    if (i + 1) % 50 == 0:
+                                        await asyncio.sleep(5)
+                                    retries = self.max_retry_attempts
+                                    chunk_uploaded_flag = False
+                                    while retries > 0:
+                                        try:
+                                            chunk = await f.read(self.max_chunk_size)
+                                            if not chunk:
+                                                break
+                                            
+                                            # Calculate hash before encryption
+                                            chunk_hash = self._calculate_chunk_hash(chunk) if self.enable_hashing else None
+                                            
+                                            # Encrypt chunk if encryption is enabled  
+                                            processed_chunk = self._encrypt_data(chunk)
+                                            
+                                            # Create enhanced filename with metadata
+                                            metadata_suffix = ""
+                                            if chunk_hash:
+                                                metadata_suffix += f".sha256_{chunk_hash[:16]}"
+                                            if self.encryption_enabled:
+                                                metadata_suffix += ".enc"
+                                            
+                                            enhanced_chunk_id = f"{chunk_id}{metadata_suffix}"
+                                            chunk_file = discord.File(fp=io.BytesIO(processed_chunk), filename=enhanced_chunk_id)
+                                            
+                                            upload_msg = f"📦 `{rel_path}` - Part {i+1}/{total_parts}"
+                                            if self.encryption_enabled:
+                                                upload_msg += " 🔐"
+                                            if chunk_hash:
+                                                upload_msg += " ✓"
+                                                
+                                            await new_channel.send(upload_msg, file=chunk_file)
+                                            await asyncio.sleep(1)
+                                            chunk_uploaded_flag = True
+                                            uploaded_bytes += len(chunk)  # Track original bytes uploaded
+                                            break
+                                        except discord.errors.HTTPException as e:
+                                            retries -= 1
+                                            delay = self._get_retry_delay(self.max_retry_attempts - retries)
+                                            await new_channel.send(f"❌ Error with part {i+1}: {e}. Retrying in {delay}s... ({retries} left)")
+                                            await asyncio.sleep(delay)
+                                        except Exception as e:
+                                            await new_channel.send(f"💥 Unexpected error: {e}")
+                                            retries = 0
+                                    if not chunk_uploaded_flag:
+                                        await new_channel.send(f"🔴 Upload failed for `{rel_path}` part {i+1}. File incomplete.")
+                                        errors.append(chunk_id)
+                                        continue
+                                    completed_chunks.add(chunk_id)
+                                    
+                                    # Calculate percentage based on bytes, not chunks
+                                    byte_percentage = int((uploaded_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 0
+                                    eta = self.get_eta(start_time, uploaded_bytes, total_size_bytes)
+                                    
+                                    if byte_percentage // 5 > last_percentage // 5 or byte_percentage == 100:
+                                        await self.bot.change_presence(activity=discord.Game(name=f"Uploading: {byte_percentage}% ({eta} left)"))
+                                        last_percentage = byte_percentage
+                                        
+                                    transfer_speed = self.get_transfer_speed(start_time, uploaded_bytes)
+                                    self.save_progress("upload", new_channel.id, {
+                                        "completed_chunks": list(completed_chunks),
+                                        "total_size_bytes": total_size_bytes,
+                                        "uploaded_size_bytes": uploaded_bytes,
+                                        "start_time": start_time,
+                                        "errors": errors,
+                                        "transfer_speed_mbps": transfer_speed,
+                                        "formatted_speed": self.format_transfer_speed(transfer_speed)
+                                    })
+                            await new_channel.send(f"✅ Upload complete for `{rel_path}`.")
+                        except Exception as e:
+                            await new_channel.send(f"💥 Error during upload of `{rel_path}`: {e}")
+                            errors.append(f"{rel_path}: {e}")
+
+                    elapsed = int(time.time() - start_time)
+                    final_percentage = int((uploaded_bytes / total_size_bytes) * 100) if total_size_bytes > 0 else 100
+                    self.clear_progress("upload", new_channel.id)
+                    await new_channel.send(
+                        f"🎉 **Upload Complete!** `{original_name}`\n"
+                        f"📊 Total size: {total_size_bytes / (1024*1024*1024):.2f} GB\n"
+                        f"📊 Uploaded: {uploaded_bytes / (1024*1024*1024):.2f} GB ({final_percentage}%)\n"
+                        f"📊 Total chunks: {total_chunks:,}\n"
+                        f"❌ Errors: {len(errors)}\n"
+                        f"⏱️ Time: {elapsed//60}m {elapsed%60}s\n"
+                        f"{'🔴 Failed chunks: ' + ', '.join(errors[:5]) + ('...' if len(errors) > 5 else '') if errors else '🟢 All chunks uploaded successfully!'}"
+                    )
+                    await self.bot.change_presence(activity=discord.Game(name="Idle"))
+                
+        except Exception as e:
+            logging.error(f"Critical error during upload: {e}")
+            try:
+                if 'new_channel' in locals() and new_channel:
+                    await new_channel.send(f"💥 **Critical Upload Error:** {e}\n"
+                                         f"Upload has been terminated. Please try again or contact support.")
+                    self.clear_progress("upload", new_channel.id)
+                else:
+                    await interaction.followup.send(f"💥 **Critical Upload Error:** {e}", ephemeral=True)
+                await self.bot.change_presence(activity=discord.Game(name="Idle"))
+            except Exception as cleanup_error:
+                logging.error(f"Error during upload cleanup: {cleanup_error}")
+        finally:
+            # Final cleanup
+            try:
+                temp_files = getattr(self, '_temp_files_to_cleanup', [])
+                temp_dirs = getattr(self, '_temp_dirs_to_cleanup', [])
+                self._cleanup_temp_resources(temp_files, temp_dirs)
+            except Exception as e:
+                logging.error(f"Error during final cleanup: {e}")
 
     @app_commands.command(name="download", description="Downloads and rebuilds a file or folder from a channel (with resume & ETA).")
     @app_commands.describe(channel_name="Name of the channel to download from (optional, uses current channel if not specified)")
