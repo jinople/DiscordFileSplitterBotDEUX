@@ -68,8 +68,7 @@ class FileSplitterCog(commands.Cog):
             # Generate random key if none provided
             key = Fernet.generate_key()
             self.fernet = Fernet(key)
-            print(f"Generated encryption key: {key.decode()}")
-            print("Add this to your .env file as ENCRYPTION_KEY for consistent decryption")
+            # Note: Generated encryption key - add to .env file as ENCRYPTION_KEY for consistent decryption
     
     def _encrypt_data(self, data):
         """Encrypt data if encryption is enabled"""
@@ -187,7 +186,8 @@ class FileSplitterCog(commands.Cog):
             with open(PROGRESS_FILE, "w") as f:
                 json.dump(all_progress, f, indent=2)
         except Exception as e:
-            print(f"Error saving progress: {e}")
+            # Silent error handling for progress save
+            pass
 
     def clear_progress(self, transfer_type, channel_id):
         try:
@@ -200,7 +200,8 @@ class FileSplitterCog(commands.Cog):
                     with open(PROGRESS_FILE, "w") as f:
                         json.dump(all_progress, f)
         except Exception as e:
-            print(f"Error clearing progress: {e}")
+            # Silent error handling for progress clear
+            pass
 
     def get_eta(self, start_time, completed, total):
         elapsed = time.time() - start_time
@@ -475,7 +476,7 @@ class FileSplitterCog(commands.Cog):
                             file_info[original_path]['size'] += attachment.size
                             
                         except Exception as e:
-                            print(f"Error parsing chunk {filename}: {e}")
+                            # Silent error handling for chunk parsing
                             continue
         
         if not chunks:

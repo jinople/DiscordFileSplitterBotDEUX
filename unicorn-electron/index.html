@@ -332,8 +332,7 @@
     </div>
 
     <script>
-        const { ipcRenderer } = require('electron');
-
+        // UWU text transformation function
         function uwuify(text) {
             return text
                 .replace(/(?:r|l)/g, "w")
@@ -342,14 +341,13 @@
                 + " ^w^";
         }
 
+        // Secure API functions (no direct electron access in renderer)
         async function fetchProgress() {
             try {
-                const progressText = await ipcRenderer.invoke('read-progress-file');
+                const progressText = await window.electronAPI.readProgressFile();
                 const data = JSON.parse(progressText);
-                console.log("Transfers found:", Object.keys(data).length);
                 updateProgressDisplay(data);
             } catch(e) {
-                console.log("Error reading progress:", e);
                 updateProgressDisplay({});
             }
         }
@@ -487,14 +485,12 @@
         }
 
         // Listen for progress updates from main process
-        ipcRenderer.on('progress-update', (event, progressData) => {
-            console.log('Renderer received progress update, length:', progressData.length);
+        window.electronAPI.onProgressUpdate((event, progressData) => {
             try {
                 const data = JSON.parse(progressData);
-                console.log('Renderer parsed data, transfers found:', Object.keys(data).length);
                 updateProgressDisplay(data);
             } catch(e) {
-                console.log('Renderer error parsing progress update:', e);
+                // Silent error handling
             }
         });
 
