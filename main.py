@@ -12,8 +12,8 @@ import argparse
 if sys.version_info < (3, 10):
     logger.error(f"Python {sys.version_info.major}.{sys.version_info.minor} is not supported. Please upgrade to Python 3.10 or higher.")
     sys.exit(1)
-elif sys.version_info >= (3, 13):
-    logger.warning(f"Python {sys.version_info.major}.{sys.version_info.minor} may not be fully tested with this Discord bot. Recommended: Python 3.10-3.12")
+elif sys.version_info >= (3, 14):
+    logger.warning(f"Python {sys.version_info.major}.{sys.version_info.minor} may not be fully tested with this Discord bot. Recommended: Python 3.10-3.13")
 
 # Check Discord.py version compatibility
 try:

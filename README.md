@@ -31,7 +31,7 @@ A Discord bot that splits large files into smaller chunks for upload to Discord 
 
 ## Requirements
 
-- **Python 3.10 - 3.12** with pip (Python 3.13+ may work but is not fully tested)
+- **Python 3.10 - 3.13** with pip (Python 3.14+ may work but is not fully tested)
 - **Discord.py 2.6.0+** (automatically installed with requirements.txt)
 - **Node.js 18+** (optional, for web interface only)
 - **Discord Bot Token** with appropriate permissions
@@ -43,7 +43,8 @@ This bot has been tested with:
 - ✅ **Python 3.10.x** + Discord.py 2.6.x
 - ✅ **Python 3.11.x** + Discord.py 2.6.x  
 - ✅ **Python 3.12.x** + Discord.py 2.6.x
-- ⚠️ **Python 3.13+** may work but is not fully tested
+- ✅ **Python 3.13.x** + Discord.py 2.6.x
+- ⚠️ **Python 3.14+** may work but is not fully tested
 
 The application includes automatic version compatibility checks and will warn you if using an untested Python version.
 
