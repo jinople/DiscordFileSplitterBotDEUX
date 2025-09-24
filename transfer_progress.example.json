@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "active_transfers": [
+    /*
+      Template only. The real transfer_progress.json is runtime state and ignored.
+
+      Example entry:
+
+      {
+        "id": "upload_123456789012345678",
+        "original_filename": "big_archive.zip",
+        "total_size_bytes": 104857600,
+        "chunk_size_bytes": 8000000,
+        "total_chunks": 14,
+        "completed_chunks": [0,1,2],
+        "status": "in_progress",          // in_progress | complete | cancelled | error
+        "started_at": "2025-09-24T10:12:00Z",
+        "updated_at": "2025-09-24T10:13:42Z",
+        "hash": {
+          "algo": "sha256",
+          "value": "optional-full-file-hash"
+        },
+        "notes": "Optional free-form field"
+      }
+
+      Notes / future ideas:
+      - Consider per-chunk hash list
+      - Resume and retry logic could repopulate completed_chunks
+      - Optional encryption flags
+    */
+  ]
+}
