@@ -20,6 +20,7 @@
     },
     "files": [
       "main.js",
+      "preload.js",
       "index.html",
       "*.gif",
       "*.png",
