@@ -410,10 +410,38 @@
                 const totalGB = (info.total_size_bytes / (1024 * 1024 * 1024)).toFixed(1);
                 const uploadedGB = (info.uploaded_size_bytes / (1024 * 1024 * 1024)).toFixed(1);
                 displayText = `${percent}% Complete!<br><span style="font-size: 1rem; opacity: 0.8;">${uploadedGB} GB of ${totalGB} GB transferred</span>`;
+                
+                // Add transfer speed
+                if (info.formatted_speed) {
+                    displayText += `<br><span style="font-size: 0.9rem; color: #ccffcc;">⚡ ${info.formatted_speed}</span>`;
+                }
+                
+                // Add feature indicators
+                const features = [];
+                if (info.encryption_enabled) features.push("🔒 Encrypted");
+                if (info.hashing_enabled) features.push("✓ Hash Verified");
+                if (info.chunk_size_mb && info.chunk_size_mb !== 8) features.push(`📦 ${info.chunk_size_mb}MB chunks`);
+                if (features.length > 0) {
+                    displayText += `<br><span style="font-size: 0.85rem; color: #ffcc99;">${features.join(' • ')}</span>`;
+                }
             } else {
                 const total = completed + errors;
                 percent = total ? Math.round((completed / total) * 100) : 0;
                 displayText = `${percent}% Complete!<br><span style="font-size: 1rem; opacity: 0.8;">${completed} chunks completed</span>`;
+                
+                // Add transfer speed for downloads too
+                if (info.formatted_speed) {
+                    displayText += `<br><span style="font-size: 0.9rem; color: #ccffcc;">⚡ ${info.formatted_speed}</span>`;
+                }
+                
+                // Add feature indicators for download
+                const features = [];
+                if (info.encryption_enabled) features.push("🔒 Decryption");
+                if (info.hashing_enabled) features.push("✓ Verification");
+                if (info.integrity_verified === false) features.push("⚠️ Integrity Issues");
+                if (features.length > 0) {
+                    displayText += `<br><span style="font-size: 0.85rem; color: #ffcc99;">${features.join(' • ')}</span>`;
+                }
             }
             
             let chunksHTML = "";
