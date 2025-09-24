@@ -8,12 +8,16 @@ A Discord bot that splits large files into smaller chunks for upload to Discord 
 
 ## Features
 
-- **File Splitting**: Automatically splits large files into chunks that fit Discord's upload limits (~8MB)
+- **File Splitting**: Automatically splits large files into chunks that fit Discord's upload limits
+- **Configurable Chunk Size**: Customize chunk size from 1MB to 25MB via environment variables
 - **Folder Support**: Upload entire folder structures while preserving directory layout
-- **Resume Capability**: Pause and resume transfers with progress tracking
-- **Integrity Verification**: Hash verification to ensure file completeness during reassembly
+- **Enhanced Resume Capability**: Advanced pause/resume with detailed progress tracking and error recovery
+- **File Encryption**: Optional AES encryption for sensitive files during transfer
+- **Integrity Verification**: Multi-layered verification with SHA-256 hashes and CRC32 checksums
+- **Web Monitoring Interface**: Real-time progress visualization with transfer speeds and feature indicators
+- **Improved Error Handling**: Exponential backoff retry logic with graceful failure recovery
 - **Slash Commands**: Modern Discord slash command interface
-- **Progress Monitoring**: Real-time upload/download progress with ETA calculations
+- **Progress Monitoring**: Real-time upload/download progress with ETA calculations and transfer speeds
 
 ## Architecture
 
@@ -49,11 +53,17 @@ cp .env.example .env
 
 Edit `.env` with your Discord bot configuration:
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `TOKEN` | Discord bot token (keep private!) | `"your_bot_token_here"` |
-| `PREFIX` | Command prefixes (comma-separated) | `". ,"` |
-| `GUILD_ID` | (Optional) Restrict bot to specific server | `"123456789012345678"` |
+| Variable | Description | Example | Default |
+|----------|-------------|---------|---------|
+| `TOKEN` | Discord bot token (keep private!) | `"your_bot_token_here"` | Required |
+| `PREFIX` | Command prefixes (comma-separated) | `". ,"` | `"."` |
+| `GUILD_ID` | (Optional) Restrict bot to specific server | `"123456789012345678"` | None |
+| `CHUNK_SIZE_MB` | File chunk size in megabytes | `16` | `8` |
+| `ENABLE_ENCRYPTION` | Enable file encryption | `true` | `false` |
+| `ENCRYPTION_KEY` | Password for encryption (leave empty for random key) | `"your_password_here"` | Empty |
+| `MAX_RETRY_ATTEMPTS` | Maximum retry attempts for failed uploads | `5` | `3` |
+| `RETRY_BACKOFF_FACTOR` | Exponential backoff multiplier | `2.0` | `2.0` |
+| `ENABLE_FILE_HASHING` | Enable SHA-256 file integrity checks | `true` | `true` |
 
 ### 3. Python Installation
 
@@ -110,10 +120,15 @@ The bot provides the following slash commands:
 
 ## File Chunking Details
 
-- **Chunk Size**: ~8MB per chunk (configurable)
-- **Naming Convention**: Encoded filenames with chunk indices
-- **Integrity**: SHA256 hash verification on reassembly
-- **Progress Tracking**: JSON-based transfer state management
+- **Chunk Size**: Configurable from 1MB to 25MB per chunk (default: 8MB)
+- **Naming Convention**: Enhanced filename encoding with metadata (hash, encryption status)
+- **Encryption**: Optional AES-256 encryption with PBKDF2 key derivation
+- **Integrity Checks**: 
+  - SHA-256 hash verification for each chunk
+  - Full file hash verification after reassembly
+  - CRC32 checksums for quick validation
+- **Progress Tracking**: JSON-based state management with transfer speeds and error tracking
+- **Error Recovery**: Exponential backoff retry with detailed error reporting
 
 ## Development
 
@@ -166,9 +181,9 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Roadmap
 
-- [ ] Enhanced resume capabilities
-- [ ] Configurable chunk sizes via environment variables  
-- [ ] Optional file encryption
-- [ ] Web/TUI monitoring interface
-- [ ] Improved error handling and recovery
-- [ ] Support for additional file integrity checks
+- [x] Enhanced resume capabilities
+- [x] Configurable chunk sizes via environment variables  
+- [x] Optional file encryption
+- [x] Web/TUI monitoring interface
+- [x] Improved error handling and recovery
+- [x] Support for additional file integrity checks
