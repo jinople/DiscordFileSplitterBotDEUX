@@ -2,6 +2,9 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
+// Disable GPU acceleration to avoid GPU process crashes on some Windows setups
+app.disableHardwareAcceleration();
+
 let mainWindow;
 
 function createWindow() {
